@@ -1,0 +1,412 @@
+# utils/tunnel.py
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import secrets
+import threading
+from dataclasses import dataclass
+from typing import Optional, Callable, Dict, Tuple, Any
+
+import msgpack
+import websockets
+
+
+def _pack(obj) -> bytes:
+    return msgpack.packb(obj, use_bin_type=True)
+
+
+def _unpack(b: bytes):
+    return msgpack.unpackb(b, raw=False)
+
+
+def _default_identity_path(app_name: str = "mc-host") -> str:
+    appdata = os.environ.get("APPDATA") or "."
+    d = os.path.join(appdata, app_name)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "identity.json")
+
+
+def load_or_create_identity(path: Optional[str] = None, app_name: str = "mc-host") -> Dict[str, str]:
+    """
+    Returns {"device_id": ..., "secret": ...}
+    Stored locally so the same machine gets the same allocation.
+    """
+    p = path or _default_identity_path(app_name)
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    ident = {"device_id": secrets.token_hex(16), "secret": secrets.token_hex(32)}
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(ident, f)
+    return ident
+
+
+@dataclass
+class TunnelInfo:
+    subdomain: str
+    domain_suffix: str
+    public_tcp: Optional[int] = None
+    public_udp: Optional[int] = None
+
+    @property
+    def public_tcp_address(self) -> Optional[str]:
+        if self.public_tcp is None:
+            return None
+        return f"{self.subdomain}.{self.domain_suffix}:{self.public_tcp}"
+
+    @property
+    def public_udp_address(self) -> Optional[str]:
+        if self.public_udp is None:
+            return None
+        return f"{self.subdomain}.{self.domain_suffix}:{self.public_udp}"
+
+
+class _UdpPerPeerProtocol(asyncio.DatagramProtocol):
+    """
+    One local UDP socket per remote peer so replies from the local Bedrock server
+    can be mapped back to the correct peer.
+    """
+    def __init__(self, peer: Tuple[str, int], send_to_edge: Callable[[Tuple[str, int], bytes], Any]):
+        self.peer = peer
+        self.send_to_edge = send_to_edge
+        self.transport: Optional[asyncio.DatagramTransport] = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = transport  # type: ignore[assignment]
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        # addr will be ('127.0.0.1', local_server_port) because we connect() to it
+        self.send_to_edge(self.peer, data)
+
+    def error_received(self, exc: Exception) -> None:
+        # Ignore noisy UDP errors
+        pass
+
+
+class TunnelClient:
+    """
+    Embedded tunnel client: supports TCP (Java) and UDP (Bedrock) through ONE WS connection.
+
+    Works best when run inside an asyncio loop.
+    For synchronous apps, use TunnelRunner below.
+    """
+
+    def __init__(
+        self,
+        edge_url: str,
+        domain_suffix: str,
+        identity_path: Optional[str] = None,
+        app_name: str = "mc-host",
+        on_status: Optional[Callable[[str], None]] = None,
+    ):
+        self.edge_url = edge_url
+        self.domain_suffix = domain_suffix
+        self.identity_path = identity_path or _default_identity_path(app_name)
+        self.app_name = app_name
+        self.on_status = on_status
+
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.stop_event = asyncio.Event()
+        self.main_task: Optional[asyncio.Task] = None
+
+        self.local_tcp_port: Optional[int] = None
+        self.local_udp_port: Optional[int] = None
+
+        self.info: Optional[TunnelInfo] = None
+        self._open_future: Optional[asyncio.Future[TunnelInfo]] = None
+
+        # TCP: conn_id -> (reader, writer)
+        self._tcp_local: Dict[int, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
+
+        # UDP: peer -> protocol/transport
+        self._udp_peers: Dict[Tuple[str, int], Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport]] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _status(self, msg: str) -> None:
+        if self.on_status:
+            self.on_status(msg)
+
+    async def open(self, tcp_local: Optional[int] = None, udp_local: Optional[int] = None) -> TunnelInfo:
+        """
+        Start tunnel for TCP and/or UDP. Returns when allocation arrives.
+        Keeps running until close().
+        """
+        if self.main_task and not self.main_task.done():
+            # already running; allow idempotent same config
+            if self.local_tcp_port == tcp_local and self.local_udp_port == udp_local and self.info:
+                return self.info
+            raise RuntimeError("TunnelClient already running with different config; call close() first.")
+
+        self.local_tcp_port = tcp_local
+        self.local_udp_port = udp_local
+        self.stop_event.clear()
+
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        self._open_future = loop.create_future()
+        self.main_task = asyncio.create_task(self._run())
+
+        return await self._open_future
+
+    async def close(self) -> None:
+        self.stop_event.set()
+
+        # Close WS
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+
+        # Close TCP locals
+        for cid in list(self._tcp_local.keys()):
+            await self._tcp_close_local(cid)
+
+        # Close UDP peer sockets
+        for peer, (_proto, transport) in list(self._udp_peers.items()):
+            try:
+                transport.close()
+            except Exception:
+                pass
+            self._udp_peers.pop(peer, None)
+
+        if self.main_task:
+            try:
+                await asyncio.wait_for(self.main_task, timeout=5)
+            except Exception:
+                self.main_task.cancel()
+
+        self.ws = None
+        self.main_task = None
+
+    # ---------------- TCP helpers ----------------
+
+    async def _tcp_open_local(self, cid: int) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        assert self.local_tcp_port is not None
+        r, w = await asyncio.open_connection("127.0.0.1", self.local_tcp_port)
+        self._tcp_local[cid] = (r, w)
+        return r, w
+
+    async def _tcp_close_local(self, cid: int) -> None:
+        pair = self._tcp_local.pop(cid, None)
+        if not pair:
+            return
+        _, w = pair
+        try:
+            w.close()
+            await w.wait_closed()
+        except Exception:
+            pass
+
+    async def _tcp_pump_local_to_edge(self, cid: int, reader: asyncio.StreamReader) -> None:
+        assert self.ws is not None
+        try:
+            while not self.stop_event.is_set():
+                data = await reader.read(65536)
+                if not data:
+                    break
+                await self.ws.send(_pack({"t": "tcp_data", "id": cid, "d": data}))
+        finally:
+            try:
+                await self.ws.send(_pack({"t": "tcp_close", "id": cid}))
+            except Exception:
+                pass
+
+    # ---------------- UDP helpers ----------------
+
+    async def _udp_get_peer_socket(self, peer: Tuple[str, int]) -> Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport]:
+        """
+        Create (or reuse) a per-peer local UDP socket connected to 127.0.0.1:<local_udp_port>.
+        """
+        assert self._loop is not None
+        assert self.local_udp_port is not None
+
+        existing = self._udp_peers.get(peer)
+        if existing:
+            return existing
+
+        def send_to_edge(peer2: Tuple[str, int], data: bytes):
+            # Called from protocol callbacks (same loop thread)
+            if not self.ws or self.stop_event.is_set():
+                return
+            # Message expected by edge: udp_data with peer + bytes
+            asyncio.create_task(self.ws.send(_pack({"t": "udp_data", "peer": [peer2[0], peer2[1]], "d": data})))
+
+        proto = _UdpPerPeerProtocol(peer=peer, send_to_edge=send_to_edge)
+
+        transport, _ = await self._loop.create_datagram_endpoint(
+            lambda: proto,
+            local_addr=("127.0.0.1", 0),                    # ephemeral local port
+            remote_addr=("127.0.0.1", self.local_udp_port),  # connect to local Bedrock server
+        )
+        transport = transport  # type: ignore[assignment]
+        self._udp_peers[peer] = (proto, transport)
+        return proto, transport  # type: ignore[return-value]
+
+    async def _udp_forward_to_local(self, peer: Tuple[str, int], data: bytes) -> None:
+        """
+        Send incoming internet datagram to local Bedrock server via the per-peer socket.
+        """
+        _proto, transport = await self._udp_get_peer_socket(peer)
+        transport.sendto(data)
+
+    # ---------------- main loop ----------------
+
+    async def _run(self) -> None:
+        ident = load_or_create_identity(self.identity_path, self.app_name)
+        device_id = ident["device_id"]
+        secret = ident["secret"]
+
+        want = []
+        if self.local_tcp_port is not None:
+            want.append({"proto": "tcp", "local": int(self.local_tcp_port)})
+        if self.local_udp_port is not None:
+            want.append({"proto": "udp", "local": int(self.local_udp_port)})
+
+        self._status("connecting")
+
+        try:
+            async with websockets.connect(
+                self.edge_url,
+                max_size=None,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=5,
+            ) as ws:
+                self.ws = ws
+                self._status("connected")
+
+                await ws.send(_pack({
+                    "t": "hello",
+                    "device_id": device_id,
+                    "secret": secret,
+                    "want": want,
+                }))
+
+                first = _unpack(await ws.recv())
+                if first.get("t") != "open_result":
+                    raise RuntimeError(f"Unexpected response: {first}")
+
+                sub = first["sub"]
+                ports = first.get("ports", {})
+                info = TunnelInfo(
+                    subdomain=sub,
+                    domain_suffix=self.domain_suffix,
+                    public_tcp=int(ports["tcp"]) if "tcp" in ports else None,
+                    public_udp=int(ports["udp"]) if "udp" in ports else None,
+                )
+                self.info = info
+
+                if self._open_future and not self._open_future.done():
+                    self._open_future.set_result(info)
+
+                # Process messages
+                async for raw in ws:
+                    if self.stop_event.is_set():
+                        break
+
+                    msg = _unpack(raw)
+                    t = msg.get("t")
+
+                    # ---- TCP ----
+                    if t == "tcp_accept":
+                        cid = int(msg["id"])
+                        r, _w = await self._tcp_open_local(cid)
+                        asyncio.create_task(self._tcp_pump_local_to_edge(cid, r))
+
+                    elif t == "tcp_data":
+                        cid = int(msg["id"])
+                        data = msg["d"]
+                        pair = self._tcp_local.get(cid)
+                        if pair:
+                            _r, w = pair
+                            w.write(data)
+                            await w.drain()
+
+                    elif t == "tcp_close":
+                        cid = int(msg["id"])
+                        await self._tcp_close_local(cid)
+
+                    # ---- UDP ----
+                    # Edge should send: {"t":"udp_data","peer":["ip",port],"d":bytes}
+                    elif t == "udp_data":
+                        peer_list = msg["peer"]
+                        peer = (str(peer_list[0]), int(peer_list[1]))
+                        data = msg["d"]
+                        await self._udp_forward_to_local(peer, data)
+
+        except Exception as e:
+            self._status(f"error: {e}")
+            if self._open_future and not self._open_future.done():
+                self._open_future.set_exception(e)
+        finally:
+            self._status("stopped")
+
+
+# ---------------- Synchronous wrapper (so run_server can call it) ----------------
+
+@dataclass
+class TunnelRunner:
+    """
+    Synchronous-friendly runner. Use start_* from normal code.
+    """
+    edge_url: str = "wss://tunnel.loafiieee.com"
+    domain_suffix: str = "mc.loafiieee.com"
+    app_name: str = "mc-host"
+    on_status: Optional[Callable[[str], None]] = None
+
+    _loop: Optional[asyncio.AbstractEventLoop] = None
+    _thread: Optional[threading.Thread] = None
+    _client: Optional[TunnelClient] = None
+    info: Optional[TunnelInfo] = None
+
+    def _ensure_loop(self) -> None:
+        if self._loop and self._thread and self._thread.is_alive():
+            return
+
+        self._loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_forever()
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def start(self, tcp_local: Optional[int] = None, udp_local: Optional[int] = None, timeout: float = 10.0) -> TunnelInfo:
+        self.stop()  # stop any existing tunnel first
+        self._ensure_loop()
+
+        assert self._loop is not None
+        self._client = TunnelClient(
+            edge_url=self.edge_url,
+            domain_suffix=self.domain_suffix,
+            app_name=self.app_name,
+            on_status=self.on_status,
+        )
+
+        fut = asyncio.run_coroutine_threadsafe(self._client.open(tcp_local=tcp_local, udp_local=udp_local), self._loop)
+        self.info = fut.result(timeout=timeout)
+        return self.info
+
+    def stop(self) -> None:
+        if self._client and self._loop:
+            try:
+                asyncio.run_coroutine_threadsafe(self._client.close(), self._loop).result(timeout=5)
+            except Exception:
+                pass
+
+        self._client = None
+        self.info = None
+
+        if self._loop:
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except Exception:
+                pass
+
+        self._loop = None
+        self._thread = None

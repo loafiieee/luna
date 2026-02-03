@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 import time
 
+import uuid
 # Add the parent directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -124,30 +125,35 @@ def server_exists(platform: str, version: str, name: str) -> bool:
                 return True
     return False
 
-def update_servers_json(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool):
+def update_servers_json(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, sticky_address: bool = True):
     print("Updating servers.json...")
     servers_file = Path("servers/servers.json")
     if servers_file.exists():
-        with open(servers_file, 'r') as f:
+        with open(servers_file, 'r', encoding='utf-8') as f:
             servers = json.load(f)
     else:
         servers = []
-    
+
+    # Generate a stable ID per installed server instance
+    server_id = str(uuid.uuid4())
+
     server_info = {
+        "server_id": server_id,
+        "sticky_address": bool(sticky_address),
         "edition": edition,
         "platform": platform,
         "version": version,
         "name": name,
         "ram": RAM,
         "eula": EULA,
-        "folder": f"{platform}-{version}-{name}"
+        "folder": f"{platform}-{version}-{name}",
     }
     servers.append(server_info)
-    
-    with open(servers_file, 'w') as f:
+
+    with open(servers_file, 'w', encoding='utf-8') as f:
         json.dump(servers, f, indent=4)
 
-def install_server(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool) -> Path:
+def install_server(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, sticky_address: bool = True) -> Path:
 
     print(f"Starting installation of {edition} server: {platform} {version} '{name}' with {RAM}MB RAM, EULA: {EULA}")
 
@@ -163,7 +169,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
 
     try:
         # Update servers.json with the new server details
-        update_servers_json(edition, platform, version, name, RAM, EULA)
+        update_servers_json(edition, platform, version, name, RAM, EULA, sticky_address=sticky_address)
 
         if edition == "java":
             java_download(platform, version, name, RAM, EULA)

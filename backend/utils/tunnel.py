@@ -6,8 +6,9 @@ import json
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass
-from typing import Optional, Callable, Dict, Tuple, Any
+from typing import Optional, Callable, Dict, Tuple, Any, List
 
 import msgpack
 import websockets
@@ -69,6 +70,7 @@ class _UdpPerPeerProtocol(asyncio.DatagramProtocol):
     One local UDP socket per remote peer so replies from the local Bedrock server
     can be mapped back to the correct peer.
     """
+
     def __init__(self, peer: Tuple[str, int], send_to_edge: Callable[[Tuple[str, int], bytes], Any]):
         self.peer = peer
         self.send_to_edge = send_to_edge
@@ -101,6 +103,9 @@ class TunnelClient:
         identity_path: Optional[str] = None,
         app_name: str = "mc-host",
         on_status: Optional[Callable[[str], None]] = None,
+        # UDP peer cleanup
+        udp_peer_ttl_s: float = 120.0,
+        udp_peer_reap_interval_s: float = 30.0,
     ):
         self.edge_url = edge_url
         self.domain_suffix = domain_suffix
@@ -115,33 +120,45 @@ class TunnelClient:
         self.local_tcp_port: Optional[int] = None
         self.local_udp_port: Optional[int] = None
 
+        self.server_id: Optional[str] = None
+        self.sticky_address: bool = True
         self.info: Optional[TunnelInfo] = None
         self._open_future: Optional[asyncio.Future[TunnelInfo]] = None
 
         # TCP: conn_id -> (reader, writer)
         self._tcp_local: Dict[int, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
 
-        # UDP: peer -> protocol/transport
-        self._udp_peers: Dict[Tuple[str, int], Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport]] = {}
+        # UDP: peer -> (protocol/transport, last_seen_monotonic)
+        self._udp_peers: Dict[Tuple[str, int], Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport, float]] = {}
+        self._udp_peer_ttl_s = float(udp_peer_ttl_s)
+        self._udp_peer_reap_interval_s = float(udp_peer_reap_interval_s)
+        self._udp_reaper_task: Optional[asyncio.Task] = None
+
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # WS send queue (prevents "task per packet")
+        self._ws_send_q: Optional[asyncio.Queue[bytes]] = None
+        self._ws_sender_task: Optional[asyncio.Task] = None
 
     def _status(self, msg: str) -> None:
         if self.on_status:
             self.on_status(msg)
 
-    async def open(self, tcp_local: Optional[int] = None, udp_local: Optional[int] = None) -> TunnelInfo:
+    async def open(self, *, server_id: str, sticky_address: bool, tcp_local: Optional[int] = None, udp_local: Optional[int] = None) -> TunnelInfo:
         """
         Start tunnel for TCP and/or UDP. Returns when allocation arrives.
         Keeps running until close().
         """
         if self.main_task and not self.main_task.done():
             # already running; allow idempotent same config
-            if self.local_tcp_port == tcp_local and self.local_udp_port == udp_local and self.info:
+            if self.local_tcp_port == tcp_local and self.local_udp_port == udp_local and self.server_id == server_id and self.sticky_address == bool(sticky_address) and self.info:
                 return self.info
             raise RuntimeError("TunnelClient already running with different config; call close() first.")
 
         self.local_tcp_port = tcp_local
         self.local_udp_port = udp_local
+        self.server_id = server_id
+        self.sticky_address = bool(sticky_address)
         self.stop_event.clear()
 
         loop = asyncio.get_running_loop()
@@ -154,7 +171,7 @@ class TunnelClient:
     async def close(self) -> None:
         self.stop_event.set()
 
-        # Close WS
+        # Close WS (sender task will exit)
         if self.ws:
             try:
                 await self.ws.close()
@@ -166,12 +183,23 @@ class TunnelClient:
             await self._tcp_close_local(cid)
 
         # Close UDP peer sockets
-        for peer, (_proto, transport) in list(self._udp_peers.items()):
+        for peer, (_proto, transport, _ts) in list(self._udp_peers.items()):
             try:
                 transport.close()
             except Exception:
                 pass
             self._udp_peers.pop(peer, None)
+
+        # Stop reaper
+        if self._udp_reaper_task:
+            self._udp_reaper_task.cancel()
+            self._udp_reaper_task = None
+
+        # Stop ws sender
+        if self._ws_sender_task:
+            self._ws_sender_task.cancel()
+            self._ws_sender_task = None
+        self._ws_send_q = None
 
         if self.main_task:
             try:
@@ -215,7 +243,48 @@ class TunnelClient:
             except Exception:
                 pass
 
+    # ---------------- WS send queue helpers ----------------
+
+    async def _ws_sender(self) -> None:
+        assert self.ws is not None
+        assert self._ws_send_q is not None
+        try:
+            while not self.stop_event.is_set():
+                raw = await self._ws_send_q.get()
+                try:
+                    await self.ws.send(raw)
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    def _ws_send_nowait(self, obj: dict) -> None:
+        if self.stop_event.is_set():
+            return
+        q = self._ws_send_q
+        if not q:
+            return
+        try:
+            q.put_nowait(_pack(obj))
+        except Exception:
+            pass
+
     # ---------------- UDP helpers ----------------
+
+    async def _udp_reaper(self) -> None:
+        try:
+            while not self.stop_event.is_set():
+                await asyncio.sleep(self._udp_peer_reap_interval_s)
+                now = time.monotonic()
+                for peer, (proto, transport, last_seen) in list(self._udp_peers.items()):
+                    if (now - last_seen) > self._udp_peer_ttl_s:
+                        try:
+                            transport.close()
+                        except Exception:
+                            pass
+                        self._udp_peers.pop(peer, None)
+        except asyncio.CancelledError:
+            pass
 
     async def _udp_get_peer_socket(self, peer: Tuple[str, int]) -> Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport]:
         """
@@ -226,24 +295,23 @@ class TunnelClient:
 
         existing = self._udp_peers.get(peer)
         if existing:
-            return existing
+            proto, transport, _ts = existing
+            self._udp_peers[peer] = (proto, transport, time.monotonic())
+            return proto, transport
 
         def send_to_edge(peer2: Tuple[str, int], data: bytes):
             # Called from protocol callbacks (same loop thread)
-            if not self.ws or self.stop_event.is_set():
-                return
-            # Message expected by edge: udp_data with peer + bytes
-            asyncio.create_task(self.ws.send(_pack({"t": "udp_data", "peer": [peer2[0], peer2[1]], "d": data})))
+            self._ws_send_nowait({"t": "udp_data", "peer": [peer2[0], peer2[1]], "d": data})
 
         proto = _UdpPerPeerProtocol(peer=peer, send_to_edge=send_to_edge)
 
         transport, _ = await self._loop.create_datagram_endpoint(
             lambda: proto,
-            local_addr=("127.0.0.1", 0),                    # ephemeral local port
-            remote_addr=("127.0.0.1", self.local_udp_port),  # connect to local Bedrock server
+            local_addr=("127.0.0.1", 0),                     # ephemeral local port
+            remote_addr=("127.0.0.1", self.local_udp_port),   # connect to local Bedrock server
         )
         transport = transport  # type: ignore[assignment]
-        self._udp_peers[peer] = (proto, transport)
+        self._udp_peers[peer] = (proto, transport, time.monotonic())
         return proto, transport  # type: ignore[return-value]
 
     async def _udp_forward_to_local(self, peer: Tuple[str, int], data: bytes) -> None:
@@ -259,6 +327,8 @@ class TunnelClient:
         ident = load_or_create_identity(self.identity_path, self.app_name)
         device_id = ident["device_id"]
         secret = ident["secret"]
+
+        assert self.server_id is not None
 
         want = []
         if self.local_tcp_port is not None:
@@ -279,14 +349,20 @@ class TunnelClient:
                 self.ws = ws
                 self._status("connected")
 
-                await ws.send(_pack({
-                    "t": "hello",
-                    "device_id": device_id,
-                    "secret": secret,
-                    "want": want,
-                }))
+                # Start sender queue
+                self._ws_send_q = asyncio.Queue()
+                self._ws_sender_task = asyncio.create_task(self._ws_sender())
+
+                # Start UDP reaper if needed
+                if self.local_udp_port is not None:
+                    self._udp_reaper_task = asyncio.create_task(self._udp_reaper())
+
+                await ws.send(_pack({"t": "hello", "op": "open", "device_id": device_id, "secret": secret, "server_id": self.server_id, "sticky_address": bool(self.sticky_address), "want": want,}))
 
                 first = _unpack(await ws.recv())
+                if first.get("t") == "err":
+                    raise RuntimeError(str(first.get("msg") or "edge error"))
+
                 if first.get("t") != "open_result":
                     raise RuntimeError(f"Unexpected response: {first}")
 
@@ -376,7 +452,7 @@ class TunnelRunner:
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()
 
-    def start(self, tcp_local: Optional[int] = None, udp_local: Optional[int] = None, timeout: float = 10.0) -> TunnelInfo:
+    def start(self, *, server_id: str, sticky_address: bool, tcp_local: Optional[int] = None, udp_local: Optional[int] = None, timeout: float = 10.0) -> TunnelInfo:
         self.stop()  # stop any existing tunnel first
         self._ensure_loop()
 
@@ -388,25 +464,69 @@ class TunnelRunner:
             on_status=self.on_status,
         )
 
-        fut = asyncio.run_coroutine_threadsafe(self._client.open(tcp_local=tcp_local, udp_local=udp_local), self._loop)
+        fut = asyncio.run_coroutine_threadsafe(self._client.open(server_id=server_id, sticky_address=sticky_address, tcp_local=tcp_local, udp_local=udp_local), self._loop)
         self.info = fut.result(timeout=timeout)
         return self.info
 
+    
+    def sync_desired(self, *, desired_server_ids: List[str], timeout: float = 8.0) -> None:
+        """One-shot: tell the edge which sticky server_ids still exist locally."""
+        self._ensure_loop()
+        assert self._loop is not None
+        fut = asyncio.run_coroutine_threadsafe(
+            _sync_desired_async(edge_url=self.edge_url, app_name=self.app_name, desired_server_ids=desired_server_ids),
+            self._loop,
+        )
+        fut.result(timeout=timeout)
+
     def stop(self) -> None:
-        if self._client and self._loop:
+        loop = self._loop
+        client = self._client
+        thread = self._thread
+
+        if client and loop:
             try:
-                asyncio.run_coroutine_threadsafe(self._client.close(), self._loop).result(timeout=5)
+                asyncio.run_coroutine_threadsafe(client.close(), loop).result(timeout=5)
             except Exception:
                 pass
 
         self._client = None
         self.info = None
 
-        if self._loop:
+        if loop:
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+
+        if loop:
+            try:
+                loop.close()
             except Exception:
                 pass
 
         self._loop = None
         self._thread = None
+
+
+async def _sync_desired_async(*, edge_url: str, app_name: str, desired_server_ids: List[str]) -> None:
+    ident = load_or_create_identity(None, app_name)
+    device_id = ident["device_id"]
+    secret = ident["secret"]
+
+    async with websockets.connect(
+        edge_url,
+        max_size=None,
+        ping_interval=20,
+        ping_timeout=20,
+        close_timeout=5,
+    ) as ws:
+        await ws.send(_pack({"t": "hello", "op": "sync", "device_id": device_id, "secret": secret, "desired": desired_server_ids}))
+        resp = _unpack(await ws.recv())
+        if resp.get("t") == "err":
+            raise RuntimeError(str(resp.get("msg") or "edge error"))
+        if resp.get("t") != "sync_ok":
+            raise RuntimeError(f"Unexpected sync response: {resp}")

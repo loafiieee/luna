@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 import secrets
 import threading
 import time
@@ -14,6 +15,17 @@ import msgpack
 import websockets
 
 
+# Cross-platform data dir (luna identity storage)
+try:
+    from utils.platform import ensure_data_dir  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from backend.utils.platform import ensure_data_dir  # type: ignore
+    except Exception:  # pragma: no cover
+        ensure_data_dir = None  # type: ignore
+
+
+
 def _pack(obj) -> bytes:
     return msgpack.packb(obj, use_bin_type=True)
 
@@ -22,14 +34,24 @@ def _unpack(b: bytes):
     return msgpack.unpackb(b, raw=False)
 
 
-def _default_identity_path(app_name: str = "mc-host") -> str:
+def _default_identity_path(app_name: str = "luna") -> str:
+    """Return path to the local identity file.
+
+    Uses an OS-appropriate per-user data directory when possible.
+    """
+    if ensure_data_dir is not None:
+        d = ensure_data_dir(app_name)
+        return str(Path(d) / "identity.json")
+
+    # Fallback: keep previous behavior
     appdata = os.environ.get("APPDATA") or "."
     d = os.path.join(appdata, app_name)
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "identity.json")
 
 
-def load_or_create_identity(path: Optional[str] = None, app_name: str = "mc-host") -> Dict[str, str]:
+
+def load_or_create_identity(path: Optional[str] = None, app_name: str = "luna") -> Dict[str, str]:
     """
     Returns {"device_id": ..., "secret": ...}
     Stored locally so the same machine gets the same allocation.
@@ -101,7 +123,7 @@ class TunnelClient:
         edge_url: str,
         domain_suffix: str,
         identity_path: Optional[str] = None,
-        app_name: str = "mc-host",
+        app_name: str = "luna",
         on_status: Optional[Callable[[str], None]] = None,
         # UDP peer cleanup
         udp_peer_ttl_s: float = 120.0,
@@ -431,7 +453,7 @@ class TunnelRunner:
     """
     edge_url: str = "wss://tunnel.loafiieee.com"
     domain_suffix: str = "mc.loafiieee.com"
-    app_name: str = "mc-host"
+    app_name: str = "luna"
     on_status: Optional[Callable[[str], None]] = None
 
     _loop: Optional[asyncio.AbstractEventLoop] = None

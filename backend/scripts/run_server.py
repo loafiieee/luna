@@ -10,13 +10,21 @@ from typing import Optional, Dict
 
 import uuid
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from utils.tunnel import TunnelRunner  # noqa: E402
+
+# Import tunnel + emitter in a way that works whether this is executed as a script
+# (imports like utils.*) or imported as a module (imports like backend.utils.*).
+try:  # noqa: E402
+    from utils.tunnel import TunnelRunner  # type: ignore
+    from utils.emit import info, warn, error  # type: ignore
+except Exception:  # pragma: no cover
+    from backend.utils.tunnel import TunnelRunner  # type: ignore
+    from backend.utils.emit import info, warn, error  # type: ignore
 
 
 TUNNEL = TunnelRunner(
     edge_url="wss://tunnel.loafiieee.com",
     domain_suffix="mc.loafiieee.com",
-    on_status=lambda s: print(f"[tunnel] {s}"),
+    on_status=lambda s: info(f"[tunnel] {s}"),
 )
 
 
@@ -192,8 +200,8 @@ def run_server(edition: str, platform: str, version: str, name: str):
     try:
         sync_desired_sticky_servers()
     except Exception as e:
-        print(f"[tunnel] warning: could not sync reservations: {e}")
-    print(f"Running {edition} server: {platform}-{version}-{name} with {ram}MB RAM and EULA accepted: {eula}")
+        warn(f"[tunnel] warning: could not sync reservations: {e}")
+    info(f"Running {edition} server: {platform}-{version}-{name} with {ram}MB RAM and EULA accepted: {eula}")
 
     server_dir = os.path.join("servers", folder)
 
@@ -216,7 +224,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
             if platform in ["forge", "neoforge"]:
                 run_bat = os.path.join(server_dir, "run.bat")
                 if os.path.exists(run_bat):
-                    print(f"Using {platform.capitalize()} run.bat script...")
+                    info(f"Using {platform.capitalize()} run.bat script...")
 
                     # Update user_jvm_args.txt with correct RAM settings (best-effort)
                     user_jvm_args = os.path.join(server_dir, "user_jvm_args.txt")
@@ -235,7 +243,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
                     proc = subprocess.Popen(["cmd", "/c", "run.bat", "nogui"], cwd=server_dir)
                 else:
-                    print("run.bat not found, falling back to direct JAR execution...")
+                    warn("run.bat not found, falling back to direct JAR execution...")
                     jdk_dir = os.path.join(server_dir, "jdk")
                     subdirs = [d for d in os.listdir(jdk_dir) if os.path.isdir(os.path.join(jdk_dir, d))]
                     if subdirs:
@@ -303,33 +311,42 @@ def run_server(edition: str, platform: str, version: str, name: str):
         # ---- Wait for readiness, THEN start tunnel ----
         if edition == "java":
             if wait_tcp_open("127.0.0.1", java_port, timeout_s=45.0):
-                info = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, tcp_local=java_port)
-                tunnel_started = True
-                print(f"[tunnel] Java join: {info.public_tcp_address}")
+                try:
+                    info_t = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, tcp_local=java_port)
+                    tunnel_started = True
+                    info(f"[tunnel] Java join: {info_t.public_tcp_address}")
+                except Exception as e:
+                    warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
             else:
-                print(f"[tunnel] Server never opened TCP port {java_port}; not starting tunnel.")
+                warn(f"[tunnel] Server never opened TCP port {java_port}; not starting tunnel.")
 
         elif edition == "bedrock":
             if wait_bedrock_udp_ready("127.0.0.1", bedrock_port, timeout_s=45.0):
-                info = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, udp_local=bedrock_port)
-                tunnel_started = True
-                print(f"[tunnel] Bedrock join: {info.public_udp_address}")
+                try:
+                    info_t = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, udp_local=bedrock_port)
+                    tunnel_started = True
+                    info(f"[tunnel] Bedrock join: {info_t.public_udp_address}")
+                except Exception as e:
+                    warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
             else:
-                print(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel.")
+                warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel.")
 
         elif edition == "both":
             ok_tcp = wait_tcp_open("127.0.0.1", java_port, timeout_s=45.0)
             ok_udp = wait_bedrock_udp_ready("127.0.0.1", bedrock_port, timeout_s=45.0)
 
             if not ok_tcp:
-                print(f"[tunnel] Java never opened TCP port {java_port}; not starting tunnel (both).")
+                warn(f"[tunnel] Java never opened TCP port {java_port}; not starting tunnel (both).")
             elif not ok_udp:
-                print(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel (both).")
+                warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel (both).")
             else:
-                info = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, tcp_local=java_port, udp_local=bedrock_port)
-                tunnel_started = True
-                print(f"[tunnel] Java join: {info.public_tcp_address}")
-                print(f"[tunnel] Bedrock join: {info.public_udp_address}")
+                try:
+                    info_t = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, tcp_local=java_port, udp_local=bedrock_port)
+                    tunnel_started = True
+                    info(f"[tunnel] Java join: {info_t.public_tcp_address}")
+                    info(f"[tunnel] Bedrock join: {info_t.public_udp_address}")
+                except Exception as e:
+                    warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
 
         # ---- Monitor: stop tunnel when server exits or java TCP port closes ----
         while True:
@@ -339,7 +356,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
             if tunnel_started and edition in ("java", "both"):
                 if not is_tcp_open("127.0.0.1", java_port):
-                    print(f"[tunnel] Local TCP port {java_port} closed; stopping tunnel.")
+                    warn(f"[tunnel] Local TCP port {java_port} closed; stopping tunnel.")
                     TUNNEL.stop()
                     tunnel_started = False
 

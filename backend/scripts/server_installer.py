@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 import time
+import random
 
 import uuid
 # Add the parent directory to the Python path
@@ -125,7 +126,7 @@ def server_exists(platform: str, version: str, name: str) -> bool:
                 return True
     return False
 
-def update_servers_json(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, sticky_address: bool = True):
+def update_servers_json(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, port: int, sticky_address: bool = True):
     print("Updating servers.json...")
     servers_file = Path("servers/servers.json")
     if servers_file.exists():
@@ -133,7 +134,6 @@ def update_servers_json(edition: str, platform: str, version: str, name: str, RA
             servers = json.load(f)
     else:
         servers = []
-
     # Generate a stable ID per installed server instance
     server_id = str(uuid.uuid4())
 
@@ -147,6 +147,7 @@ def update_servers_json(edition: str, platform: str, version: str, name: str, RA
         "ram": RAM,
         "eula": EULA,
         "folder": f"{platform}-{version}-{name}",
+        "port": port
     }
     servers.append(server_info)
 
@@ -167,12 +168,23 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
     server_folder = Path(f"servers/{platform}-{version}-{name}")
     os.makedirs(server_folder, exist_ok=True)
 
+    # get a list of all used server ports
+    servers_file = Path("servers/servers.json")
+    if servers_file.exists():
+        with open(servers_file, 'r') as f:
+            servers = json.load(f)
+        used_ports = [server.get("port", 0) for server in servers]
+
+    create_port = random.randint(25565, 65535)
+    while create_port in used_ports:
+        create_port = random.randint(25565, 65535)
+
     try:
         # Update servers.json with the new server details
-        update_servers_json(edition, platform, version, name, RAM, EULA, sticky_address=sticky_address)
+        update_servers_json(edition, platform, version, name, RAM, EULA, port=create_port, sticky_address=sticky_address)
 
         if edition == "java":
-            java_download(platform, version, name, RAM, EULA)
+            java_download(platform, version, name, RAM, EULA, port=create_port)
 
         elif edition == "bedrock":
             bedrock_download(name, RAM, EULA)
@@ -194,7 +206,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
 
     return server_folder
 
-def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool):
+def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, port: int):
     print("Downloading Java server...")
     if platform not in list_platforms():
         raise ValueError(f"Unsupported platform: {platform}")
@@ -224,7 +236,6 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool):
     if not os.path.exists(java_cmd):
         raise RuntimeError(f"Java executable not found at {java_cmd}")
     
-    # if platform is drop in compatible, download and run.
     if platform in ["purpur", "paper", "pufferfish", "folia", "vanilla", "velocity", "waterfall", "fabric", "quilt", "forge", "neoforge"]:
         print("Downloading server jar...")
 
@@ -428,7 +439,20 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool):
         
         with open(f"servers/{platform}-{version}-{name}/eula.txt", "w") as f:
             f.write("eula=true\n")
-        
+
+    # change server.properties to use the created port
+    properties_path = f"servers/{platform}-{version}-{name}/server.properties"
+    if os.path.exists(properties_path):
+        with open(properties_path, "r") as f:
+            lines = f.readlines()
+        with open(properties_path, "w") as f:
+            for line in lines:
+                if line.startswith("server-port="):
+                    f.write(f"server-port={port}\n")
+                else:
+                    f.write(line)
+        print(f"Set server port to {port} in server.properties")
+
 def bedrock_download(name: str, RAM: int, EULA: bool):
     print("Downloading Bedrock server...")
     if os.name != 'nt':

@@ -1,15 +1,3 @@
-"""backend/utils/emit.py
-
-Small, dependency-free logger/event emitter.
-
-- Default: human-readable logs.
-- Optional JSON-lines mode (best for a GUI like Tauri).
-
-Design note:
-`event_type` is the first positional argument so payloads are free to use the key
-`name` without colliding (a prior bug when the param itself was called `name`).
-"""
-
 from __future__ import annotations
 
 import json

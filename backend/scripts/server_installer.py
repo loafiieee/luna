@@ -14,6 +14,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.download_file import *
 from utils.get_platforms import *
 from utils.get_versions import *
+from utils.get_reseved_ports import *
+from utils.platform import *
 
 import requests
 from tqdm import tqdm
@@ -174,6 +176,16 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
         with open(servers_file, 'r') as f:
             servers = json.load(f)
         used_ports = [server.get("port", 0) for server in servers]
+
+    # get a list of all OS-reserved ports and add them to a seperate list
+    if edition == "java" or "both":
+        reserved_ports = get_reserved_ports("tcp")
+        for start, end in reserved_ports:
+            used_ports.extend(range(start, end + 1))
+    elif edition == "bedrock":
+        reserved_ports = get_reserved_ports("udp")
+        for start, end in reserved_ports:
+            used_ports.extend(range(start, end + 1))
 
     create_port = random.randint(25565, 65535)
     while create_port in used_ports:

@@ -3,6 +3,7 @@ from typing import List
 
 from backend.utils.get_versions import list_versions
 from backend.utils.get_platforms import list_platforms
+from backend.utils.get_reseved_ports import get_reserved_ports
 from backend.scripts.server_installer import install_server
 from backend.scripts.run_server import run_server, sync_desired_sticky_servers
 from backend.scripts.delete_server import delete_server
@@ -121,6 +122,15 @@ def main(argv: List[str]) -> int:
         _maybe_sync()
 
         info(f"Deleted: {folder}")
+        return 0
+    
+    if cmd == "get_reserved_ports":
+        if len(argv) < 3:
+            error("Usage: cli.py get_reserved_ports <protocol>")
+            return 1
+        
+        protocol = argv[2]
+        print(get_reserved_ports(protocol))
         return 0
 
     if cmd == "help":

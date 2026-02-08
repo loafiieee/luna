@@ -1,11 +1,3 @@
-"""backend/utils/platform.py
-
-Tiny OS/arch abstraction for luna.
-
-This module is intentionally dependency-free so it can be imported very early by
-CLI code and scripts.
-"""
-
 from __future__ import annotations
 
 import os

@@ -134,7 +134,7 @@ def main(argv: List[str]) -> int:
         return 0
 
     if cmd == "help":
-        info("Available commands: get_versions, install_server, get_platforms, run_server, delete_server")
+        info("Available commands: get_versions, install_server, get_platforms, run_server, delete_server, get_reserved_ports")
         info("Add --json to output machine-readable JSON events")
         return 0
 

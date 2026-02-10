@@ -1,8 +1,7 @@
 def delete_server(folder: str):
     import shutil
-    import os
     from pathlib import Path
-    import json
+    from backend.utils.state import STATE
 
     server_folder = Path("servers") / folder
 
@@ -12,11 +11,8 @@ def delete_server(folder: str):
     # Remove the server folder
     shutil.rmtree(server_folder)
 
-    # Remove from servers.json
-    servers_file = Path("servers") / "servers.json"
-    if servers_file.exists():
-        with open(servers_file, "r") as f:
-            servers_data = json.load(f)
-        servers_data = [s for s in servers_data if s.get("folder") != folder]
-        with open(servers_file, "w") as f:
-            json.dump(servers_data, f, indent=4)
+    # Remove from servers.json (locked + atomic)
+    def _mutate(servers):
+        return [s for s in servers if s.get("folder") != folder]
+
+    STATE.mutate(_mutate)

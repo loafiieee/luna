@@ -1,145 +1,87 @@
-# Luna Tauri Prep + Build Guide
+# Luna Tauri Prep + Build Guide (Direct `cli.py`, no sidecar)
 
-This guide covers two parts:
-
-1. **What you need before Tauri UI work** (backend readiness checklist).
-2. **How to build the Tauri app** (Rust + frontend integration flow).
+This guide assumes you want Tauri to directly launch and control `python cli.py ...` processes and pipe stdin/stdout to `xterm`.
 
 ---
 
-## 1) Backend readiness checklist (do this first)
+## 1) What to finish before frontend work
 
-### 1.1 Start the sidecar API (persistent process)
+### 1.1 Decide process model (recommended)
 
-You now have `backend/sidecar.py`, which runs an HTTP API and keeps PTY sessions alive in memory for terminal interactions.
+Use **one long-lived child process per running server console tab**:
 
-Run it from repo root:
+- Start command: `python cli.py run_server <edition> <platform> <version> <name> --json`
+- Keep process handle in Rust state
+- Stream stdout/stderr to frontend
+- Write user terminal input to child stdin
+- Stop by sending `stop\n` to stdin first, then force-kill if needed
 
-```bash
-python -m backend.sidecar
-```
-
-Expected startup log:
-
-```json
-{"event":"sidecar_started","host":"127.0.0.1","port":8765}
-```
-
-You can change host/port with:
-
-- `LUNA_SIDECAR_HOST`
-- `LUNA_SIDECAR_PORT`
+Why this works:
+- `run_server` is lifecycle/blocking by design and continues until exit.
+- Tauri can treat it as a persistent console process.
 
 ---
 
-### 1.2 Verify API health
+### 1.2 Keep using `servers.json` state helpers
+
+Your backend already has atomic+locked state management (`STATE`) and migrated server metadata flows.
+Keep using that path for all install/delete/read operations.
+
+---
+
+### 1.3 Use JSON output mode for machine-readable logs
+
+Always pass `--json` when launching `cli.py` from Tauri so UI can parse structured events.
+
+Example:
 
 ```bash
-curl http://127.0.0.1:8765/health
-```
-
-Expected:
-
-```json
-{"ok":true}
+python cli.py run_server java paper 1.21.1 myserver --json
 ```
 
 ---
 
-### 1.3 Verify server listing
+### 1.4 Do **not** use CLI PTY subcommands from separate short-lived processes
 
-```bash
-curl http://127.0.0.1:8765/servers
-```
-
-Returns:
-
-```json
-{"servers":[ ... ]}
-```
+`pty_start`/`pty_write`/etc. keep session state in-process, so they are not useful if each call starts a new Python process.
+For direct Tauri control, just manage the `run_server` child process in Rust.
 
 ---
 
-### 1.4 Verify `run_server` terminal command flow (important)
+## 2) Tauri architecture (direct CLI)
 
-Start a managed server process (replace fields with a real server):
+## 2.1 Rust responsibilities
 
-```bash
-curl -X POST http://127.0.0.1:8765/servers/start \
-  -H 'Content-Type: application/json' \
-  -d '{"edition":"java","platform":"paper","version":"1.21.1","name":"myserver"}'
-```
-
-You’ll get a `session_id`. Use it to send console commands:
-
-```bash
-curl -X POST http://127.0.0.1:8765/servers/command \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"<SESSION_ID>","command":"say hello from Luna"}'
-```
-
-Poll logs:
-
-```bash
-curl "http://127.0.0.1:8765/pty/poll?session_id=<SESSION_ID>"
-```
-
-Stop process:
-
-```bash
-curl -X POST http://127.0.0.1:8765/servers/stop \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"<SESSION_ID>"}'
-```
-
-> Yes: this gives you stdin-like command entry for `run_server` sessions from UI.
+- Maintain a global process map:
+  - key: `server_key` (`edition:platform:version:name`)
+  - value: process handle + stdin writer + output task channel
+- Expose commands to frontend:
+  - `list_servers`
+  - `start_server`
+  - `send_server_command`
+  - `stop_server`
+  - `server_status`
+- Emit console output events to frontend with `app_handle.emit_all(...)`
 
 ---
 
-### 1.5 Optional: generic PTY endpoints
+## 2.2 Frontend responsibilities (React)
 
-- `POST /pty/start` with `{ "cmd": ["python", "cli.py", "help"] }`
-- `POST /pty/write`
-- `GET /pty/poll?session_id=...`
-- `POST /pty/resize`
-- `GET /pty/status?session_id=...`
-- `POST /pty/stop`
-
-These are useful if you want tabs/tools beyond server consoles.
-
----
-
-## 2) API contract for the Tauri app
-
-Base URL: `http://127.0.0.1:8765`
-
-### Read endpoints
-
-- `GET /health`
-- `GET /servers`
-- `GET /pty/poll?session_id=...`
-- `GET /pty/status?session_id=...`
-
-### Server lifecycle endpoints
-
-- `POST /servers/install`
-- `POST /servers/delete`
-- `POST /servers/start`
-- `POST /servers/command`
-- `POST /servers/stop`
-
-### Generic PTY endpoints
-
-- `POST /pty/start`
-- `POST /pty/write`
-- `POST /pty/resize`
-- `POST /pty/stop`
+- Dashboard page:
+  - list servers
+  - start/stop buttons
+- Server detail page:
+  - xterm console
+  - command input box
+  - players panel (later)
+- Subscribe to Tauri event stream for console lines
+- Send user keystrokes/commands to Rust command
 
 ---
 
-## 3) Build the Tauri app
+## 3) Build steps
 
-## 3.1 Create project
+## 3.1 Create app
 
 ```bash
 npm create tauri-app@latest luna-ui
@@ -148,13 +90,11 @@ npm install
 npm run tauri dev
 ```
 
-Choose:
-- Frontend: React + TypeScript (recommended)
-- Bundler: Vite
+Choose React + TypeScript + Vite.
 
 ---
 
-## 3.2 Add terminal UI deps
+## 3.2 Install console deps
 
 ```bash
 npm i xterm xterm-addon-fit
@@ -162,139 +102,160 @@ npm i xterm xterm-addon-fit
 
 ---
 
-## 3.3 Add app routes/pages
+## 3.3 Add Rust state for server processes
 
-Suggested pages:
+In `src-tauri/src/main.rs` (or module files), create an app state like:
 
-- `/` Dashboard (server cards)
-- `/server/:id` Server detail
+- `HashMap<String, ManagedServerProc>`
+- each entry stores:
+  - `Child`
+  - `stdin` handle
+  - running flag / exit code
 
-Detail tabs:
-- details
-- console
-- backups
-- tunnels
-- settings
-- files
+Guard with `Arc<Mutex<...>>`.
 
 ---
 
-## 3.4 Implement sidecar client in frontend
+## 3.4 Implement Rust commands
 
-Create `src/lib/api.ts`:
+### `list_servers`
+- Run `python cli.py list_servers --json`
+- Parse output and return typed list
 
-- `getServers()`
-- `startServer(payload)`
-- `sendServerCommand(sessionId, command)`
-- `pollPty(sessionId)`
-- `stopServer(sessionId)`
+### `start_server(edition, platform, version, name)`
+- Spawn child:
+  - `python cli.py run_server <...> --json`
+- Capture stdout/stderr
+- Start async reader that emits lines to frontend:
+  - event name: `server-log:<server_key>`
 
-Use fetch with typed helpers and clear error messages.
+### `send_server_command(server_key, command)`
+- Lookup child stdin
+- write `command + "\n"`
+- flush
 
----
+### `stop_server(server_key)`
+- send `stop\n`
+- wait grace period (e.g., 8–15s)
+- force kill if still running
 
-## 3.5 Dashboard UI (first milestone)
-
-Implement card list matching your mock:
-
-- server icon
-- name
-- online/offline status pill
-- quick start/stop action
-- floating `+` button to install/create server
-
-Data source:
-- poll `/servers` every 2–5s
-
----
-
-## 3.6 Server detail + console (second milestone)
-
-When opening a server page:
-
-1. call `/servers/start` (or attach to existing session if you track one)
-2. initialize `xterm`
-3. start poll loop (`/pty/poll`) every 100–250ms
-4. write returned lines into xterm
-5. on terminal input, call `/servers/command`
-6. on resize, call `/pty/resize`
-
-If you add an input box under console, send same command endpoint on Enter.
+### `server_status(server_key)`
+- return running/exit code
 
 ---
 
-## 3.7 Suggested UI components
+## 3.5 Frontend: dashboard page
 
-- `ServerCard`
-- `ServerStatusPill`
-- `ConsolePanel` (xterm + command box)
-- `PlayersPanel`
-- `ServerTabs`
-- `AppTitlebar` (custom, if using undecorated window)
+Match your mock:
 
----
+- top app bar (Luna)
+- server cards with icon, name, status
+- quick play/stop controls
+- floating `+` button
 
-## 3.8 Tauri-side process management (production)
-
-For local dev, you can run sidecar manually.
-For production app, wire Rust startup to spawn sidecar automatically.
-
-Rust responsibilities:
-- start sidecar on app launch
-- wait for `/health`
-- stop sidecar on app exit
-
-Tip: keep sidecar local-only (`127.0.0.1`) and avoid exposing externally.
+Refresh list every 2–5 seconds.
 
 ---
 
-## 4) Recommended development order
+## 3.6 Frontend: server detail + console page
 
-1. Sidecar running + health/servers checks.
-2. Dashboard with real server list.
-3. Start/stop button wiring.
-4. Console tab with PTY poll + command send.
-5. Style pass to match your mock.
-6. Additional tabs (backups/tunnels/settings/files).
+Layout:
 
----
+- left nav tabs: details/console/backups/tunnels/settings/files
+- center: console panel (`xterm`)
+- bottom input: command entry + send button
+- right panel: players/search list
 
-## 5) Troubleshooting
+Data flow:
 
-### Sidecar starts but `/servers/start` fails
-
-- Confirm server entry exists in `servers/servers.json`.
-- Confirm `edition/platform/version/name` exactly matches.
-
-### Commands don’t appear in server console
-
-- Ensure command endpoint appends newline (already done in sidecar).
-- Check `/pty/poll` output for process exit lines.
-
-### Console freezes
-
-- Reduce poll interval to 100ms and cap rendered backlog.
-- Keep only last ~5k lines in memory for UI performance.
+1. on page open, call `start_server(...)` if not running
+2. subscribe to `server-log:<server_key>`
+3. append output lines to `xterm`
+4. on Enter in input box, call `send_server_command(...)`
+5. on stop button, call `stop_server(...)`
 
 ---
 
-## 6) Security and stability notes
+## 4) Parsing `--json` CLI logs/events
 
-- Keep sidecar bound to localhost.
-- Validate all UI input before API calls.
-- Don’t pass arbitrary user shell commands to `/pty/start` in production UI unless sandboxed.
-- Prefer server-specific endpoints (`/servers/start`, `/servers/command`, `/servers/stop`) for normal use.
+Your CLI emits structured logs/events in JSON mode. For frontend:
+
+- parse line-by-line JSON
+- route by `event` + `level`
+- display `log` and `error` lines in console
+- optional: show toast notifications for install/delete/run lifecycle events
+
+If a line is not valid JSON, render raw text fallback.
 
 ---
 
-## 7) Minimal “ready to start Tauri” definition
+## 5) Suggested minimal API surface inside Tauri
 
-You are ready when all are true:
+Expose these commands to frontend first:
 
-- `python -m backend.sidecar` runs.
-- `/health` and `/servers` return valid JSON.
-- You can start a server with `/servers/start`.
-- You can send commands with `/servers/command`.
-- You can read logs with `/pty/poll`.
+- `list_servers()`
+- `start_server(edition, platform, version, name)`
+- `send_server_command(server_key, command)`
+- `stop_server(server_key)`
+- `server_status(server_key)`
 
-Once those pass, start frontend implementation.
+Add later:
+
+- `install_server(...)`
+- `delete_server(...)`
+- `modrinth_search(...)`
+- `modrinth_download(...)`
+
+---
+
+## 6) Stability checklist
+
+Before full UI polish, verify:
+
+1. Start server from dashboard
+2. Console log stream appears in detail page
+3. Sending `say hello` works
+4. Sending `stop` cleanly shuts down
+5. Reopening detail page reattaches to existing process
+6. App close cleans up running child processes safely
+
+---
+
+## 7) Troubleshooting
+
+### No output in console
+- Ensure `--json` is passed
+- Ensure Rust reader task is attached to child stdout
+- Ensure event subscription name matches emitted name
+
+### Commands not executing
+- Ensure stdin writes append newline
+- Ensure stdin is flushed
+- Ensure process still running
+
+### Process exits immediately
+- Check server key arguments (`edition/platform/version/name`)
+- Check server exists in `servers/servers.json`
+- Display stderr lines in xterm for diagnosis
+
+---
+
+## 8) Security notes
+
+- Don’t expose arbitrary command execution from renderer
+- Validate all command inputs in Rust
+- Restrict spawn arguments to known CLI commands
+- Keep principle: renderer requests, Rust validates/executes
+
+---
+
+## 9) “Ready to build UI” definition
+
+You are ready when:
+
+- Tauri can spawn `python cli.py run_server ... --json`
+- stdout/stderr stream reaches xterm
+- stdin command send works (`say`, `stop`)
+- process map survives navigation changes
+
+At that point, build out the full SquidServers-like UI.

@@ -18,6 +18,7 @@ from utils.get_platforms import *
 from utils.get_versions import *
 from utils.get_reseved_ports import *
 from utils.platform import *
+from backend.utils.state import STATE
 
 import requests
 from tqdm import tqdm
@@ -80,6 +81,10 @@ def _find_java_executable(jdk_root: Path) -> Path:
             return candidate
 
     raise RuntimeError(f"Java executable not found in {jdk_root}")
+
+
+def _run_checked(args: list[str], *, cwd: str | None = None) -> None:
+    subprocess.run(args, cwd=cwd, check=True)
 
 def get_forge_installer_url(mc_version: str) -> str:
     """Get the latest Forge installer URL for a given Minecraft version."""
@@ -161,22 +166,13 @@ def download_jdk(version: int, folder: str):
     return str(java_cmd)
 
 def remove_from_servers_json(folder: str):
-    servers_file = Path("servers/servers.json")
-    if servers_file.exists():
-        with open(servers_file, 'r') as f:
-            servers = json.load(f)
-        servers = [s for s in servers if s.get("folder") != folder]
-        with open(servers_file, 'w') as f:
-            json.dump(servers, f, indent=4)
+    STATE.mutate(lambda servers: [s for s in servers if s.get("folder") != folder])
 
 def server_exists(platform: str, version: str, name: str) -> bool:
-    servers_file = Path("servers/servers.json")
-    if servers_file.exists():
-        with open(servers_file, 'r') as f:
-            servers = json.load(f)
-        for server in servers:
-            if server.get("platform") == platform and server.get("version") == version and server.get("name") == name:
-                return True
+    servers = STATE.read()
+    for server in servers:
+        if server.get("platform") == platform and server.get("version") == version and server.get("name") == name:
+            return True
     return False
 
 def update_servers_json(
@@ -191,12 +187,7 @@ def update_servers_json(
     voice_port: int | None = None,
 ):
     print("Updating servers.json...")
-    servers_file = Path("servers/servers.json")
-    if servers_file.exists():
-        with open(servers_file, "r", encoding="utf-8") as f:
-            servers = json.load(f)
-    else:
-        servers = []
+    servers = STATE.read()
 
     # Generate a stable ID per installed server instance
     server_id = str(uuid.uuid4())
@@ -258,9 +249,7 @@ def update_servers_json(
         server_info["voice_port"] = int(voice_port)
 
     servers.append(server_info)
-
-    with open(servers_file, "w", encoding="utf-8") as f:
-        json.dump(servers, f, indent=4)
+    STATE.write(servers)
 
 def install_server(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, sticky_address: bool = True) -> Path:
 
@@ -277,12 +266,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
     os.makedirs(server_folder, exist_ok=True)
 
     # get a list of all used server ports
-    servers_file = Path("servers/servers.json")
-    used_ports: list[int] = []
-    if servers_file.exists():
-        with open(servers_file, 'r') as f:
-            servers = json.load(f)
-        used_ports = [server.get("port", 0) for server in servers]
+    used_ports: list[int] = [int(server.get("port", 0)) for server in STATE.read()]
 
     # get a list of all OS-reserved ports and add them to a seperate list
     if edition in ("java", "both"):
@@ -347,9 +331,9 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
         subdirs = [d for d in os.listdir(jdk_dir) if os.path.isdir(os.path.join(jdk_dir, d))]
         if subdirs:
             jdk_subdir = subdirs[0]
-            java_cmd = os.path.join(jdk_dir, jdk_subdir, "bin", "java.exe")
+            java_cmd = str(Path(jdk_dir) / jdk_subdir / "bin" / ("java.exe" if os.name == "nt" else "java"))
         else:
-            java_cmd = os.path.join(jdk_dir, "bin", "java.exe")
+            java_cmd = str(Path(jdk_dir) / "bin" / ("java.exe" if os.name == "nt" else "java"))
     
     print(f"Java command: {java_cmd}")
     if not os.path.exists(java_cmd):
@@ -359,7 +343,11 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
         print("Downloading server jar...")
 
         if platform == "fabric":
-            os.system(f"""cd servers/{platform}-{version}-{name} && curl -OJ https://meta.fabricmc.net/v2/versions/loader/{version}/0.18.4/1.1.1/server/jar && ren fabric-server-mc.{version}-loader.0.18.4-launcher.1.1.1.jar {platform}-{version}.jar""")
+            server_dir = Path(f"servers/{platform}-{version}-{name}")
+            fabric_filename = f"fabric-server-mc.{version}-loader.0.18.4-launcher.1.1.1.jar"
+            fabric_url = f"https://meta.fabricmc.net/v2/versions/loader/{version}/0.18.4/1.1.1/server/jar"
+            downloaded = download_file(fabric_url, server_dir / fabric_filename)
+            downloaded.rename(server_dir / f"{platform}-{version}.jar")
         elif platform == "quilt":
             # Download Quilt installer
             installer_url = "https://quiltmc.org/api/v1/download-latest-installer/java-universal"
@@ -368,9 +356,7 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
             
             # Run Quilt installer
             print("Running Quilt installer...")
-            result = subprocess.run(f'"{java_cmd}" -jar quilt-installer.jar install server {version} --download-server', shell=True, cwd=f"servers/{platform}-{version}-{name}")
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to install Quilt server for version {version}")
+            _run_checked([java_cmd, "-jar", "quilt-installer.jar", "install", "server", version, "--download-server"], cwd=f"servers/{platform}-{version}-{name}")
             
             # Find and rename the server JAR
             server_dir = f"servers/{platform}-{version}-{name}"
@@ -412,9 +398,7 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
             
             # Run Forge installer
             print("Running Forge installer...")
-            result = subprocess.run(f'"{java_cmd}" -jar forge-installer.jar --installServer', shell=True, cwd=f"servers/{platform}-{version}-{name}")
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to install Forge server for version {version}")
+            _run_checked([java_cmd, "-jar", "forge-installer.jar", "--installServer"], cwd=f"servers/{platform}-{version}-{name}")
             
             # Find the installed server JAR (usually named something like forge-{mc_version}-{forge_version}.jar)
             server_dir = f"servers/{platform}-{version}-{name}"
@@ -472,9 +456,7 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
             
             # Run NeoForge installer
             print("Running NeoForge installer...")
-            result = subprocess.run(f'"{java_cmd}" -jar neoforge-installer.jar --installServer', shell=True, cwd=f"servers/{platform}-{version}-{name}")
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to install NeoForge server for version {version}")
+            _run_checked([java_cmd, "-jar", "neoforge-installer.jar", "--installServer"], cwd=f"servers/{platform}-{version}-{name}")
             
             # NeoForge doesn't create a single JAR file like Forge does
             # Instead, it creates run.bat/run.sh scripts and a libraries directory
@@ -514,17 +496,40 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
 
         print("Running server for initial setup...")
         if platform in ["forge", "neoforge"]:
-            # For Forge/NeoForge, check if run.bat exists and use it, otherwise run JAR directly
             run_bat = f"servers/{platform}-{version}-{name}/run.bat"
             if os.path.exists(run_bat):
-                result = subprocess.run('run.bat nogui', shell=True, cwd=f"servers/{platform}-{version}-{name}")
+                _run_checked(["cmd", "/c", "run.bat", "nogui"], cwd=f"servers/{platform}-{version}-{name}")
             else:
-                # Fallback to direct JAR execution
-                result = subprocess.run(f'"{java_cmd}" -Xmx{RAM}M -Xms{RAM}M -jar {platform}-{version}.jar nogui', shell=True, cwd=f"servers/{platform}-{version}-{name}")
+                _run_checked([java_cmd, f"-Xmx{RAM}M", f"-Xms{RAM}M", "-jar", f"{platform}-{version}.jar", "nogui"], cwd=f"servers/{platform}-{version}-{name}")
         else:
-            result = subprocess.run(f'"{java_cmd}" -Xmx{RAM}M -Xms{RAM}M -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Daikars.new.flags=true -Dusing.aikars.flags=https://mcutils.com -jar {platform}-{version}.jar --nogui', shell=True, cwd=f"servers/{platform}-{version}-{name}")
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to run {platform} server for initial setup")
+            _run_checked([
+                java_cmd,
+                f"-Xmx{RAM}M",
+                f"-Xms{RAM}M",
+                "-XX:+UseG1GC",
+                "-XX:+ParallelRefProcEnabled",
+                "-XX:MaxGCPauseMillis=200",
+                "-XX:+UnlockExperimentalVMOptions",
+                "-XX:+DisableExplicitGC",
+                "-XX:+AlwaysPreTouch",
+                "-XX:G1NewSizePercent=30",
+                "-XX:G1MaxNewSizePercent=40",
+                "-XX:G1HeapRegionSize=8M",
+                "-XX:G1ReservePercent=20",
+                "-XX:G1HeapWastePercent=5",
+                "-XX:G1MixedGCCountTarget=4",
+                "-XX:InitiatingHeapOccupancyPercent=15",
+                "-XX:G1MixedGCLiveThresholdPercent=90",
+                "-XX:G1RSetUpdatingPauseTimePercent=5",
+                "-XX:SurvivorRatio=32",
+                "-XX:+PerfDisableSharedMem",
+                "-XX:MaxTenuringThreshold=1",
+                "-Daikars.new.flags=true",
+                "-Dusing.aikars.flags=https://mcutils.com",
+                "-jar",
+                f"{platform}-{version}.jar",
+                "--nogui",
+            ], cwd=f"servers/{platform}-{version}-{name}")
         
         with open(f"servers/{platform}-{version}-{name}/eula.txt", "w") as f:
             f.write("eula=true\n")
@@ -532,12 +537,10 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
     elif platform in ["spigot", "craftbukkit"]:
         print("Downloading BuildTools...")
         #First, download the buildtools jar
-        os.system(f"""cd servers/{platform}-{version}-{name} && wget https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar""")
+        download_file("https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar", Path(f"servers/{platform}-{version}-{name}") / "BuildTools.jar")
         # Then, run buildtools to generate the server jar
         print("Building server with BuildTools...")
-        result = subprocess.run(f'"{java_cmd}" -jar BuildTools.jar --rev {version} --compile {platform}', shell=True, cwd=f"servers/{platform}-{version}-{name}")
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to build {platform} server using BuildTools")
+        _run_checked([java_cmd, "-jar", "BuildTools.jar", "--rev", version, "--compile", platform], cwd=f"servers/{platform}-{version}-{name}")
         
         # Find the built JAR
         server_dir = f"servers/{platform}-{version}-{name}"
@@ -552,9 +555,34 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
         
         print("Running server for initial setup...")
         # Run the server to generate initial files
-        result = subprocess.run(f'"{java_cmd}" -Xmx{RAM}M -Xms{RAM}M -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Daikars.new.flags=true -Dusing.aikars.flags=https://mcutils.com -jar {actual_jar} --nogui', shell=True, cwd=f"servers/{platform}-{version}-{name}")
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to run {platform} server for initial setup")
+        _run_checked([
+            java_cmd,
+            f"-Xmx{RAM}M",
+            f"-Xms{RAM}M",
+            "-XX:+UseG1GC",
+            "-XX:+ParallelRefProcEnabled",
+            "-XX:MaxGCPauseMillis=200",
+            "-XX:+UnlockExperimentalVMOptions",
+            "-XX:+DisableExplicitGC",
+            "-XX:+AlwaysPreTouch",
+            "-XX:G1NewSizePercent=30",
+            "-XX:G1MaxNewSizePercent=40",
+            "-XX:G1HeapRegionSize=8M",
+            "-XX:G1ReservePercent=20",
+            "-XX:G1HeapWastePercent=5",
+            "-XX:G1MixedGCCountTarget=4",
+            "-XX:InitiatingHeapOccupancyPercent=15",
+            "-XX:G1MixedGCLiveThresholdPercent=90",
+            "-XX:G1RSetUpdatingPauseTimePercent=5",
+            "-XX:SurvivorRatio=32",
+            "-XX:+PerfDisableSharedMem",
+            "-XX:MaxTenuringThreshold=1",
+            "-Daikars.new.flags=true",
+            "-Dusing.aikars.flags=https://mcutils.com",
+            "-jar",
+            actual_jar,
+            "--nogui",
+        ], cwd=f"servers/{platform}-{version}-{name}")
         
         with open(f"servers/{platform}-{version}-{name}/eula.txt", "w") as f:
             f.write("eula=true\n")
@@ -578,24 +606,30 @@ def bedrock_download(name: str, RAM: int, EULA: bool):
         raise RuntimeError("Bedrock server installation is only supported on Windows.")
     if not EULA:
         raise ValueError("EULA not accepted")
-    # Download the Bedrock server from the official source
-    os.system(f"cd servers/bedrock-bedrock-{name} && wget https://www.minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.132.3.zip && powershell -command \"Expand-Archive -Path 'bedrock-server-1.21.132.3.zip' -DestinationPath '.'""")
-    #run the bedrock server once to generate files
-    os.system(f"cd servers/bedrock-bedrock-{name} && bedrock_server.exe")
-    #bedrock server does not stop after generating files, so we need to kill it once we know its finished
-    time.sleep(10)  # wait 10 seconds to ensure files are generated
-    os.system(f"taskkill /f /im bedrock_server.exe")
 
+    server_dir = Path(f"servers/bedrock-bedrock-{name}")
+    zip_path = server_dir / "bedrock-server.zip"
+    download_file("https://www.minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.132.3.zip", zip_path)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(server_dir)
+    zip_path.unlink(missing_ok=True)
+
+    proc = subprocess.Popen(["bedrock_server.exe"], cwd=str(server_dir))
+    time.sleep(10)
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
 def geyser_download(platform: str, version: str, name: str, RAM: int, EULA: bool):
     print("Installing 'both' edition (Java + Geyser bridge)...")
 
     # Install Java server first. Port is set by install_server() in servers.json and updated below.
     server_record = None
-    with open("servers/servers.json", "r", encoding="utf-8") as f:
-        for server in json.load(f):
-            if server.get("platform") == platform and server.get("version") == version and server.get("name") == name:
-                server_record = server
-                break
+    for server in STATE.read():
+        if server.get("platform") == platform and server.get("version") == version and server.get("name") == name:
+            server_record = server
+            break
     if server_record is None:
         raise RuntimeError("Server record missing during Geyser install")
 

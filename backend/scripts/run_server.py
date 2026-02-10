@@ -10,6 +10,8 @@ import struct
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+from backend.utils.state import STATE
+
 import uuid
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -94,21 +96,9 @@ def reconcile_servers_with_disk() -> None:
     servers_dir = "servers"
     os.makedirs(servers_dir, exist_ok=True)
 
-    path = os.path.join(servers_dir, "servers.json")
-
-    # If servers.json doesn't exist yet, create it.
-    if not os.path.exists(path):
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=4)
-        os.replace(tmp, path)
-
     # Load existing (best-effort)
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            servers = json.load(f)
-        if not isinstance(servers, list):
-            servers = []
+        servers = STATE.read()
     except Exception as e:
         warn(f"[servers] warning: could not read servers.json, resetting: {e}")
         servers = []
@@ -174,10 +164,7 @@ def reconcile_servers_with_disk() -> None:
         changed = True
 
     if changed:
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(new_servers, f, indent=4)
-        os.replace(tmp, path)
+        STATE.write(new_servers)
 
     # Run migrations/normalization (voice ports, etc.)
     try:
@@ -187,9 +174,7 @@ def reconcile_servers_with_disk() -> None:
 
 
 def read_servers_file() -> list:
-    path = "servers/servers.json"
-    with open(path, "r", encoding="utf-8") as f:
-        servers = json.load(f)
+    servers = STATE.read()
 
     # Migration: ensure every server has server_id, sticky_address, folder, and voice_port (Java servers)
     changed = False
@@ -267,10 +252,7 @@ def read_servers_file() -> list:
                 changed = True
 
     if changed:
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(servers, f, indent=4)
-        os.replace(tmp, path)
+        STATE.write(servers)
 
     return servers
 

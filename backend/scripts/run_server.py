@@ -7,6 +7,7 @@ import time
 import threading
 import socket
 import struct
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 import uuid
@@ -25,6 +26,40 @@ except Exception:  # pragma: no cover
     from backend.utils.get_reseved_ports import get_reserved_ports  # type: ignore
 
 
+
+
+def _find_java_cmd(server_dir: str) -> str:
+    jdk_dir = Path(server_dir) / "jdk"
+    suffix = ".exe" if os.name == "nt" else ""
+
+    direct = jdk_dir / "bin" / f"java{suffix}"
+    if direct.exists():
+        return str(direct)
+
+    if jdk_dir.exists():
+        for subdir in jdk_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            candidate = subdir / "bin" / f"java{suffix}"
+            if candidate.exists():
+                return str(candidate)
+
+    raise RuntimeError(f"Java executable not found in {jdk_dir}")
+
+
+def _read_geyser_bedrock_port(server_dir: str) -> Optional[int]:
+    cfg = Path(server_dir) / "plugins" / "Geyser-Spigot" / "config.yml"
+    if not cfg.exists():
+        return None
+
+    for line in cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("port:"):
+            try:
+                return int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
 TUNNEL = TunnelRunner(
     edge_url="wss://tunnel.loafiieee.com",
     domain_suffix="mc.loafiieee.com",
@@ -510,8 +545,11 @@ def run_server(edition: str, platform: str, version: str, name: str):
     # Java uses server-port
     java_port = int(props.get("server-port", "25565"))
 
-    # Bedrock / Geyser generally uses a separate UDP port; older code reused server-port
+    # Bedrock/Geyser port for both-edition servers comes from Geyser config when available.
     bedrock_port = int(props.get("server-port", "19132"))
+    geyser_port = _read_geyser_bedrock_port(server_dir)
+    if geyser_port is not None:
+        bedrock_port = geyser_port
 
     # Voice chat local UDP port (per-server so multiple servers can run)
     voice_local_port: Optional[int] = None
@@ -569,9 +607,10 @@ def run_server(edition: str, platform: str, version: str, name: str):
         # ---- Start the server process ----
         if edition in ("java", "both"):
             if platform in ["forge", "neoforge"]:
-                run_bat = os.path.join(server_dir, "run.bat")
-                if os.path.exists(run_bat):
-                    info(f"Using {platform.capitalize()} run.bat script...")
+                run_script = "run.bat" if os.name == "nt" else "run.sh"
+                run_script_path = os.path.join(server_dir, run_script)
+                if os.path.exists(run_script_path):
+                    info(f"Using {platform.capitalize()} {run_script} script...")
 
                     # Update user_jvm_args.txt with correct RAM settings (best-effort)
                     user_jvm_args = os.path.join(server_dir, "user_jvm_args.txt")
@@ -589,16 +628,13 @@ def run_server(edition: str, platform: str, version: str, name: str):
                         with open(user_jvm_args, "w", encoding="utf-8") as f:
                             f.write(content)
 
-                    proc = subprocess.Popen(["cmd", "/c", "run.bat", "nogui"], cwd=server_dir)
-                else:
-                    warn("run.bat not found, falling back to direct JAR execution...")
-                    jdk_dir = os.path.join(server_dir, "jdk")
-                    subdirs = [d for d in os.listdir(jdk_dir) if os.path.isdir(os.path.join(jdk_dir, d))]
-                    if subdirs:
-                        jdk_subdir = subdirs[0]
-                        java_cmd = os.path.join(jdk_dir, jdk_subdir, "bin", "java.exe")
+                    if os.name == "nt":
+                        proc = subprocess.Popen(["cmd", "/c", "run.bat", "nogui"], cwd=server_dir)
                     else:
-                        java_cmd = os.path.join(jdk_dir, "bin", "java.exe")
+                        proc = subprocess.Popen(["sh", "run.sh", "nogui"], cwd=server_dir)
+                else:
+                    warn(f"{run_script} not found, falling back to direct JAR execution...")
+                    java_cmd = _find_java_cmd(server_dir)
 
                     jar = f"{platform}-{version}.jar"
                     proc = subprocess.Popen(
@@ -606,13 +642,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
                         cwd=server_dir,
                     )
             else:
-                jdk_dir = os.path.join(server_dir, "jdk")
-                subdirs = [d for d in os.listdir(jdk_dir) if os.path.isdir(os.path.join(jdk_dir, d))]
-                if subdirs:
-                    jdk_subdir = subdirs[0]
-                    java_cmd = os.path.join(jdk_dir, jdk_subdir, "bin", "java.exe")
-                else:
-                    java_cmd = os.path.join(jdk_dir, "bin", "java.exe")
+                java_cmd = _find_java_cmd(server_dir)
 
                 jar = f"{platform}-{version}.jar"
                 proc = subprocess.Popen(

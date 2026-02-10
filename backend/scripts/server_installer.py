@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 import time
 import random
+import platform as py_platform
+import zipfile
 
 import uuid
 # Add the parent directory to the Python path
@@ -20,13 +22,64 @@ from utils.platform import *
 import requests
 from tqdm import tqdm
 
+
+def _parse_mc_version(version: str) -> tuple[int, ...]:
+    nums: list[int] = []
+    for part in version.split('.'):
+        try:
+            nums.append(int(part))
+        except ValueError:
+            break
+    return tuple(nums)
+
+
 def get_java_version(version: str) -> int:
-    if version >= "1.20.5":
+    parsed = _parse_mc_version(version)
+    if parsed >= (1, 20, 5):
         return 21
-    elif version >= "1.17":
+    elif parsed >= (1, 17):
         return 17
     else:
         return 8
+
+
+def _adoptium_platform_triplet() -> tuple[str, str, str]:
+    system = py_platform.system().lower()
+    machine = py_platform.machine().lower()
+
+    if system.startswith("win"):
+        os_name = "windows"
+    elif system == "darwin":
+        os_name = "mac"
+    elif system == "linux":
+        os_name = "linux"
+    else:
+        raise RuntimeError(f"Unsupported OS for JDK download: {system}")
+
+    if machine in {"x86_64", "amd64"}:
+        arch = "x64"
+    elif machine in {"aarch64", "arm64"}:
+        arch = "aarch64"
+    else:
+        raise RuntimeError(f"Unsupported architecture for JDK download: {machine}")
+
+    return os_name, arch, "zip"
+
+
+def _find_java_executable(jdk_root: Path) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    direct = jdk_root / "bin" / f"java{suffix}"
+    if direct.exists():
+        return direct
+
+    for subdir in jdk_root.iterdir():
+        if not subdir.is_dir():
+            continue
+        candidate = subdir / "bin" / f"java{suffix}"
+        if candidate.exists():
+            return candidate
+
+    raise RuntimeError(f"Java executable not found in {jdk_root}")
 
 def get_forge_installer_url(mc_version: str) -> str:
     """Get the latest Forge installer URL for a given Minecraft version."""
@@ -79,9 +132,11 @@ def get_neoforge_installer_url(mc_version: str) -> str:
 
 def download_jdk(version: int, folder: str):
     print(f"Downloading JDK {version}...")
-    url = f"https://api.adoptium.net/v3/binary/latest/{version}/ga/windows/x64/jdk/hotspot/normal/eclipse"
+    os_name, arch, image_type = _adoptium_platform_triplet()
+    url = f"https://api.adoptium.net/v3/binary/latest/{version}/ga/{os_name}/{arch}/jdk/hotspot/normal/eclipse?project=jdk&image_type={image_type}"
     zip_path = f"{folder}/jdk.zip"
     response = requests.get(url, stream=True)
+    response.raise_for_status()
     total_size = int(response.headers.get('content-length', 0))
     with open(zip_path, 'wb') as f, tqdm(
         desc=f"JDK {version}",
@@ -94,20 +149,16 @@ def download_jdk(version: int, folder: str):
             size = f.write(data)
             bar.update(size)
     print("Extracting JDK...")
-    os.system(f'powershell -command "Expand-Archive -Path \'{zip_path}\' -DestinationPath \'{folder}/jdk\'"')
+    extract_dir = Path(folder) / "jdk"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
     os.remove(zip_path)
-    
-    # Find the actual JDK folder
-    jdk_dir = f"{folder}/jdk"
-    subdirs = [d for d in os.listdir(jdk_dir) if os.path.isdir(os.path.join(jdk_dir, d))]
-    if subdirs:
-        jdk_subdir = subdirs[0]
-        java_cmd = os.path.join(jdk_dir, jdk_subdir, "bin", "java.exe")
-    else:
-        java_cmd = os.path.join(jdk_dir, "bin", "java.exe")
-    
+
+    java_cmd = _find_java_executable(extract_dir)
+
     print("JDK downloaded and extracted.")
-    return java_cmd
+    return str(java_cmd)
 
 def remove_from_servers_json(folder: str):
     servers_file = Path("servers/servers.json")
@@ -227,6 +278,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
 
     # get a list of all used server ports
     servers_file = Path("servers/servers.json")
+    used_ports: list[int] = []
     if servers_file.exists():
         with open(servers_file, 'r') as f:
             servers = json.load(f)
@@ -535,7 +587,64 @@ def bedrock_download(name: str, RAM: int, EULA: bool):
     os.system(f"taskkill /f /im bedrock_server.exe")
 
 def geyser_download(platform: str, version: str, name: str, RAM: int, EULA: bool):
-    print("Downloading Geyser server...")
-    pass
+    print("Installing 'both' edition (Java + Geyser bridge)...")
+
+    # Install Java server first. Port is set by install_server() in servers.json and updated below.
+    server_record = None
+    with open("servers/servers.json", "r", encoding="utf-8") as f:
+        for server in json.load(f):
+            if server.get("platform") == platform and server.get("version") == version and server.get("name") == name:
+                server_record = server
+                break
+    if server_record is None:
+        raise RuntimeError("Server record missing during Geyser install")
+
+    java_download(platform, version, name, RAM, EULA, port=int(server_record["port"]))
+
+    server_dir = Path(f"servers/{platform}-{version}-{name}")
+    plugins_dir = server_dir / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download latest stable Geyser plugin from Modrinth.
+    geyser_version_url = "https://api.modrinth.com/v2/project/geyser/"
+    versions = requests.get(f"{geyser_version_url}version", timeout=30)
+    versions.raise_for_status()
+    version_data = versions.json()
+    if not isinstance(version_data, list) or not version_data:
+        raise RuntimeError("Could not fetch Geyser versions from Modrinth")
+
+    plugin_file = None
+    for file_obj in version_data[0].get("files", []):
+        filename = str(file_obj.get("filename", ""))
+        if filename.endswith(".jar"):
+            plugin_file = file_obj
+            break
+
+    if not plugin_file:
+        raise RuntimeError("No downloadable Geyser plugin file found")
+
+    geyser_path = plugins_dir / "Geyser-Spigot.jar"
+    download_file(plugin_file["url"], geyser_path)
+
+    # Configure Bedrock port so both Java + Bedrock can run from same managed server.
+    bedrock_port = int(server_record["port"])
+    geyser_config = plugins_dir / "Geyser-Spigot" / "config.yml"
+    if geyser_config.exists():
+        lines = geyser_config.read_text(encoding="utf-8", errors="ignore").splitlines()
+        out: list[str] = []
+        changed = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("port:") and line.startswith("  "):
+                out.append(f"  port: {bedrock_port}")
+                changed = True
+            else:
+                out.append(line)
+        if not changed:
+            out.append("bedrock:")
+            out.append(f"  port: {bedrock_port}")
+        geyser_config.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+    print("Geyser plugin installed. 'both' server is ready.")
 
     

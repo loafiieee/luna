@@ -8,7 +8,6 @@ from backend.utils.get_reseved_ports import *
 from backend.scripts.server_installer import *
 from backend.scripts.run_server import *
 from backend.scripts.delete_server import *
-from backend.utils.process_manager import MANAGER
 
 # Modrinth support
 from backend.utils.modrinth import *
@@ -408,66 +407,6 @@ def main(argv: List[str]) -> int:
             "modrinth_search, modrinth_project, modrinth_download, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
-        return 0
-
-    if cmd == "pty_start":
-        if len(argv) < 3:
-            error("Usage: cli.py pty_start <program> [args...]")
-            return 1
-        program = argv[2]
-        args = argv[3:]
-        session_id = MANAGER.start([program, *args], cwd=str(Path.cwd()))
-        event("pty_started", session_id=session_id)
-        info(session_id)
-        return 0
-
-    if cmd == "pty_write":
-        if len(argv) < 4:
-            error("Usage: cli.py pty_write <session_id> <data>")
-            return 1
-        session_id = argv[2]
-        data = argv[3]
-        MANAGER.write(session_id, data)
-        event("pty_written", session_id=session_id, size=len(data))
-        return 0
-
-    if cmd == "pty_poll":
-        if len(argv) < 3:
-            error("Usage: cli.py pty_poll <session_id>")
-            return 1
-        session_id = argv[2]
-        lines = MANAGER.poll_output(session_id)
-        event("pty_output", session_id=session_id, lines=lines)
-        print(lines)
-        return 0
-
-    if cmd == "pty_resize":
-        if len(argv) < 5:
-            error("Usage: cli.py pty_resize <session_id> <cols> <rows>")
-            return 1
-        session_id = argv[2]
-        cols = _parse_int_arg("cols", argv[3])
-        rows = _parse_int_arg("rows", argv[4])
-        MANAGER.resize(session_id, cols, rows)
-        event("pty_resized", session_id=session_id, cols=cols, rows=rows)
-        return 0
-
-    if cmd == "pty_status":
-        if len(argv) < 3:
-            error("Usage: cli.py pty_status <session_id>")
-            return 1
-        session_id = argv[2]
-        status = MANAGER.status(session_id)
-        print(status)
-        return 0
-
-    if cmd == "pty_stop":
-        if len(argv) < 3:
-            error("Usage: cli.py pty_stop <session_id>")
-            return 1
-        session_id = argv[2]
-        MANAGER.stop(session_id)
-        event("pty_stopped", session_id=session_id)
         return 0
 
     error("Unknown command")

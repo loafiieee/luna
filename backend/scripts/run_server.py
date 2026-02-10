@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import threading
 import socket
 import struct
 from typing import Optional, Dict, Any, List, Tuple
@@ -30,8 +31,124 @@ TUNNEL = TunnelRunner(
     on_status=lambda s: info(f"[tunnel] {s}"),
 )
 
+def _pump_process_output(proc, prefix):
+    try:
+        if not proc.stdout:
+            return
+        for line in iter(proc.stdout.readline, ''):
+            if not line:
+                break
+            info(f"[{prefix}] {line.rstrip()}")
+    except Exception as e:
+        warn(f"[{prefix}] output pump error: {e}")
+
 
 # ---------------- Servers JSON helpers ----------------
+
+
+
+def reconcile_servers_with_disk() -> None:
+    """Reconcile servers/servers.json with the actual folders in servers/.
+
+    - Removes entries whose server folder no longer exists.
+    - Adds entries for server folders that exist but are missing from servers.json.
+
+    This is intentionally conservative: it does not try to infer RAM/ports/EULA beyond safe defaults.
+    Further migrations (server_id, voice_port, etc.) are handled by read_servers_file().
+    """
+    servers_dir = "servers"
+    os.makedirs(servers_dir, exist_ok=True)
+
+    path = os.path.join(servers_dir, "servers.json")
+
+    # If servers.json doesn't exist yet, create it.
+    if not os.path.exists(path):
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump([], f, indent=4)
+        os.replace(tmp, path)
+
+    # Load existing (best-effort)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            servers = json.load(f)
+        if not isinstance(servers, list):
+            servers = []
+    except Exception as e:
+        warn(f"[servers] warning: could not read servers.json, resetting: {e}")
+        servers = []
+
+    # Normalize folder key for matching
+    def _folder_of(s: dict) -> str | None:
+        fld = s.get("folder")
+        if isinstance(fld, str) and fld:
+            return fld
+        plat, ver, name = s.get("platform"), s.get("version"), s.get("name")
+        if isinstance(plat, str) and isinstance(ver, str) and isinstance(name, str) and plat and ver and name:
+            return f"{plat}-{ver}-{name}"
+        return None
+
+    by_folder: dict[str, dict] = {}
+    for s in servers:
+        if isinstance(s, dict):
+            fld = _folder_of(s)
+            if fld:
+                # ensure folder is stored (helps future reads)
+                s["folder"] = fld
+                by_folder[fld] = s
+
+    # Gather actual folders on disk
+    disk_folders = [
+        d for d in os.listdir(servers_dir)
+        if os.path.isdir(os.path.join(servers_dir, d))
+    ]
+
+    changed = False
+    new_servers: list[dict] = []
+
+    # Keep only entries that still exist on disk
+    disk_set = set(disk_folders)
+    for fld, s in by_folder.items():
+        if fld in disk_set:
+            new_servers.append(s)
+        else:
+            changed = True
+
+    # Add any folders missing from servers.json
+    for fld in disk_folders:
+        if fld in by_folder:
+            continue
+
+        parts = fld.split("-", 2)
+        if len(parts) != 3:
+            warn(f"[servers] skipping unrecognized folder name: {fld}")
+            continue
+
+        platform, version, name = parts
+        new_servers.append({
+            "server_id": str(uuid.uuid4()),
+            "edition": "java",  # safe default (can't reliably infer)
+            "platform": platform,
+            "version": version,
+            "name": name,
+            "folder": fld,
+            "ram": 2048,
+            "eula": False,
+            "sticky_address": True,
+        })
+        changed = True
+
+    if changed:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(new_servers, f, indent=4)
+        os.replace(tmp, path)
+
+    # Run migrations/normalization (voice ports, etc.)
+    try:
+        read_servers_file()
+    except Exception as e:
+        warn(f"[servers] warning: post-reconcile migration failed: {e}")
 
 
 def read_servers_file() -> list:
@@ -532,7 +649,8 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
         elif edition == "bedrock":
             exe = os.path.join(server_dir, "bedrock_server.exe")
-            proc = subprocess.Popen([exe], cwd=server_dir)
+            proc = subprocess.Popen([exe], cwd=server_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            threading.Thread(target=_pump_process_output, args=(proc, 'server'), daemon=True).start()
 
         else:
             raise ValueError("edition must be 'java', 'bedrock', or 'both'")

@@ -38,6 +38,13 @@ def main(argv: List[str]) -> int:
     if "--json" in argv:
         argv = [a for a in argv if a != "--json"]
         set_json_mode(True)
+        install_output_capture()
+            
+    # Keep servers.json in sync with what's actually on disk
+    try:
+        reconcile_servers_with_disk()
+    except Exception as e:
+        warn(f"[servers] warning: could not reconcile servers.json: {e}")
 
     if len(argv) < 2:
         error("Usage: cli.py <command> [<args>...]")
@@ -275,6 +282,12 @@ def main(argv: List[str]) -> int:
         if out_file:
             info(f"Downloaded {out_file} successfully.")
         return 0
+    
+    if cmd == "list_servers":
+        servers = read_servers_file()
+        info(servers)
+        return 0
+
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, delete_server, get_reserved_ports, "

@@ -2,8 +2,64 @@ from __future__ import annotations
 
 import json
 import sys
+import io
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict
+
+_RAW_STDOUT = sys.__stdout__
+_RAW_STDERR = sys.__stderr__
+_CAPTURE_INSTALLED = False
+
+class _LineBufferedWriter(io.TextIOBase):
+    def __init__(self, underlying, level):
+        self._u = underlying
+        self._level = level
+        self._buf = ""
+        self._lock = threading.Lock()
+
+    def writable(self): return True
+
+    def write(self, s):
+        if not s: return 0
+        if not _JSON_MODE:
+            return self._u.write(s)
+        with self._lock:
+            self._buf += s
+            while '\n' in self._buf:
+                line, self._buf = self._buf.split('\n', 1)
+                line = line.rstrip('\r')
+                if line:
+                    _print_json({
+                        'event': 'log',
+                        'level': self._level,
+                        'message': line,
+                        'timestamp': _ts(),
+                    })
+        return len(s)
+
+    def flush(self):
+        if not _JSON_MODE:
+            try: self._u.flush()
+            except Exception: pass
+            return
+        with self._lock:
+            if self._buf:
+                _print_json({
+                    'event': 'log',
+                    'level': self._level,
+                    'message': self._buf.rstrip('\r'),
+                    'timestamp': _ts(),
+                })
+                self._buf = ""
+
+def install_output_capture():
+    global _CAPTURE_INSTALLED
+    if _CAPTURE_INSTALLED: return
+    _CAPTURE_INSTALLED = True
+    sys.stdout = _LineBufferedWriter(sys.stdout, 'info')
+    sys.stderr = _LineBufferedWriter(sys.stderr, 'error')
+
 
 _JSON_MODE: bool = False
 
@@ -27,7 +83,8 @@ def _ts() -> str:
 
 
 def _print_json(obj: Dict[str, Any]) -> None:
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    _RAW_STDOUT.write(json.dumps(obj, ensure_ascii=False) + '\n')
+    _RAW_STDOUT.flush()
 
 
 def info(message: str) -> None:

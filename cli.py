@@ -1,6 +1,6 @@
 from pathlib import Path
 import sys
-from typing import List
+from typing import Dict, List, Optional, Set, Tuple
 
 from backend.utils.get_versions import *
 from backend.utils.get_platforms import *
@@ -31,6 +31,111 @@ def _maybe_sync() -> None:
 def _usage_install() -> None:
     error("Usage: cli.py install_server <edition> <platform> <version> <name> <RAM> <EULA> [sticky_address]")
     error("  sticky_address: true/false (default true)")
+
+
+def _resolve_modrinth_download_dir(server_path: Path, project_type: str) -> Path:
+    plugins_dir = server_path / "plugins"
+    mods_dir = server_path / "mods"
+    datapacks_dir = server_path / "world" / "datapacks"
+
+    if project_type == "datapack":
+        datapacks_dir.mkdir(parents=True, exist_ok=True)
+        return datapacks_dir
+
+    if project_type == "plugin":
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        return plugins_dir
+
+    if project_type == "mod":
+        mods_dir.mkdir(parents=True, exist_ok=True)
+        return mods_dir
+
+    # Fallback behavior for other project types.
+    if plugins_dir.exists():
+        return plugins_dir
+    if mods_dir.exists():
+        return mods_dir
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    return plugins_dir
+
+
+def _resolve_version_from_dependency(
+    client: ModrinthClient,
+    dep: Dict[str, str],
+    loaders: List[str],
+    game_versions: List[str],
+) -> Optional[Tuple[str, Dict[str, object]]]:
+    version_id = dep.get("version_id")
+    if version_id:
+        version = client.get_version(version_id)
+        project_id = version.get("project_id")
+        if isinstance(project_id, str):
+            return project_id, version
+        return None
+
+    dep_project_id = dep.get("project_id")
+    if not dep_project_id:
+        return None
+
+    versions = client.get_project_versions(
+        dep_project_id,
+        loaders=loaders if loaders else None,
+        game_versions=game_versions if game_versions else None,
+    )
+    if not versions:
+        return None
+    return dep_project_id, versions[0]
+
+
+def _download_with_required_dependencies(
+    client: ModrinthClient,
+    *,
+    root_project_id: str,
+    root_version: Dict[str, object],
+    out_dir: Path,
+    loaders: List[str],
+    game_versions: List[str],
+) -> List[Path]:
+    downloaded: List[Path] = []
+    visited_projects: Set[str] = set()
+    queue: List[Tuple[str, Dict[str, object]]] = [(root_project_id, root_version)]
+
+    while queue:
+        project_id, version = queue.pop(0)
+        if project_id in visited_projects:
+            continue
+        visited_projects.add(project_id)
+
+        selection = client.pick_download_file(version)
+        info(f"Downloading {project_id}: {selection.filename}...")
+        downloaded.append(client.download_version_file(version, out_dir))
+
+        dependencies = version.get("dependencies")
+        if not isinstance(dependencies, list):
+            continue
+
+        for dep in dependencies:
+            if not isinstance(dep, dict):
+                continue
+            if dep.get("dependency_type") != "required":
+                continue
+
+            try:
+                resolved = _resolve_version_from_dependency(client, dep, loaders, game_versions)
+            except ModrinthError as e:
+                warn(f"Could not resolve required dependency for {project_id}: {e}")
+                continue
+
+            if not resolved:
+                warn(f"Could not resolve required dependency for {project_id}: {dep}")
+                continue
+
+            dep_project_id, dep_version = resolved
+            if dep_project_id in visited_projects:
+                continue
+            queue.append((dep_project_id, dep_version))
+
+    return downloaded
 
 
 def main(argv: List[str]) -> int:
@@ -154,7 +259,7 @@ def main(argv: List[str]) -> int:
 
     if cmd == "modrinth_search":
         if len(argv) < 3:
-            error("Usage: cli.py modrinth_search <query> [--project_type=mod|plugin|modpack|resourcepack|shader] [--loader=loader] [--game_version=version] [--category=category]")
+            error("Usage: cli.py modrinth_search <query> [--project_type=mod|plugin|modpack|resourcepack|shader|datapack] [--loader=loader] [--game_version=version] [--category=category]")
             return 1
 
         query = argv[2]
@@ -209,15 +314,18 @@ def main(argv: List[str]) -> int:
 
     if cmd == "modrinth_download":
         if len(argv) < 4:
-            error("Usage: cli.py modrinth_download <server_folder> <project_id> [--loader=loader] [--game_version=version]")
+            error("Usage: cli.py modrinth_download <server_folder> <project_id> [--project_type=plugin|mod|datapack] [--loader=loader] [--game_version=version]")
             return 1
 
         server_folder = argv[2]
         project_id = argv[3]
+        project_type: Optional[str] = None
         loaders = []
         game_versions = []
         for arg in argv[4:]:
-            if arg.startswith("--loader="):
+            if arg.startswith("--project_type="):
+                project_type = arg.split("=", 1)[1]
+            elif arg.startswith("--loader="):
                 loaders.append(arg.split("=", 1)[1])
             elif arg.startswith("--game_version="):
                 game_versions.append(arg.split("=", 1)[1])
@@ -225,8 +333,18 @@ def main(argv: List[str]) -> int:
                 error(f"Unknown argument: {arg}")
                 return 1
 
-        # Resolve latest matching version
         client = ModrinthClient()
+        try:
+            project = client.get_project(project_id)
+        except ModrinthError as e:
+            error(str(e))
+            return 1
+
+        detected_project_type = project.get("project_type")
+        if not project_type and isinstance(detected_project_type, str):
+            project_type = detected_project_type
+
+        # Resolve latest matching version
         try:
             versions = client.get_project_versions(
                 project_id,
@@ -242,44 +360,28 @@ def main(argv: List[str]) -> int:
             return 1
 
         latest_version = versions[0]
-        files = latest_version.get("files", []) or []
-        if not files:
-            error("No downloadable files found for the latest version.")
-            return 1
-
-        # Prefer primary file if present, else first
-        chosen = next((f for f in files if f.get("primary")), None) or files[0]
-        download_url = chosen.get("url")
-        filename = chosen.get("filename")
-        if not download_url or not filename:
-            error("No download URL/filename found for the selected file.")
-            return 1
 
         server_path = Path("servers") / server_folder
         if not server_path.exists():
             error(f"Server folder {server_path} does not exist.")
             return 1
 
-        # Original behavior installed into plugins/. If plugins/ doesn't exist, fall back to mods/.
-        plugins_dir = server_path / "plugins"
-        mods_dir = server_path / "mods"
-        if plugins_dir.exists():
-            out_dir = plugins_dir
-        elif mods_dir.exists():
-            out_dir = mods_dir
-        else:
-            # Default to plugins to preserve the original intent.
-            out_dir = plugins_dir
-            out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = _resolve_modrinth_download_dir(server_path, project_type or "")
 
-        info(f"Downloading from {download_url}...")
         try:
-            out_file = download_file(download_url, out_dir / filename)
-        except Exception as e:
+            downloaded = _download_with_required_dependencies(
+                client,
+                root_project_id=project_id,
+                root_version=latest_version,
+                out_dir=out_dir,
+                loaders=loaders,
+                game_versions=game_versions,
+            )
+        except (ModrinthError, Exception) as e:
             error(str(e))
             return 1
 
-        if out_file:
+        for out_file in downloaded:
             info(f"Downloaded {out_file} successfully.")
         return 0
     
@@ -291,7 +393,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download"
+            "modrinth_search, modrinth_project, modrinth_download (supports datapacks + dependencies)"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

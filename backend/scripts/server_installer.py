@@ -266,12 +266,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
     os.makedirs(server_folder, exist_ok=True)
 
     # get a list of all used server ports
-    servers_file = Path("servers/servers.json")
-    used_ports: list[int] = []
-    if servers_file.exists():
-        with open(servers_file, 'r') as f:
-            servers = json.load(f)
-        used_ports = [server.get("port", 0) for server in servers]
+    used_ports: list[int] = [int(server.get("port", 0)) for server in STATE.read()]
 
     # get a list of all OS-reserved ports and add them to a seperate list
     if edition in ("java", "both"):

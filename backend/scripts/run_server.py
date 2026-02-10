@@ -6,9 +6,10 @@ import sys
 import time
 import socket
 import struct
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, List, Tuple
 
 import uuid
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Import tunnel + emitter in a way that works whether this is executed as a script
@@ -16,9 +17,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 try:  # noqa: E402
     from utils.tunnel import TunnelRunner  # type: ignore
     from utils.emit import info, warn, error  # type: ignore
+    from utils.get_reseved_ports import get_reserved_ports  # type: ignore
 except Exception:  # pragma: no cover
     from backend.utils.tunnel import TunnelRunner  # type: ignore
     from backend.utils.emit import info, warn, error  # type: ignore
+    from backend.utils.get_reseved_ports import get_reserved_ports  # type: ignore
 
 
 TUNNEL = TunnelRunner(
@@ -28,13 +31,63 @@ TUNNEL = TunnelRunner(
 )
 
 
+# ---------------- Servers JSON helpers ----------------
+
+
 def read_servers_file() -> list:
     path = "servers/servers.json"
     with open(path, "r", encoding="utf-8") as f:
         servers = json.load(f)
 
-    # Migration: ensure every server has server_id and sticky_address
+    # Migration: ensure every server has server_id, sticky_address, folder, and voice_port (Java servers)
     changed = False
+
+    # Pre-compute used UDP ports (voice + bedrock) so we can safely allocate new voice ports.
+    used_udp_ports: set[int] = set()
+    for s in servers:
+        vp = s.get("voice_port")
+        if isinstance(vp, int):
+            used_udp_ports.add(int(vp))
+        # Bedrock / "both" uses UDP on the server port (or a Geyser port)
+        ed = str(s.get("edition") or "")
+        if ed in ("bedrock", "both"):
+            p = s.get("port")
+            if isinstance(p, int):
+                used_udp_ports.add(int(p))
+
+    reserved_udp: List[Tuple[int, int]] = []
+    try:
+        reserved_udp = get_reserved_ports("udp")
+    except Exception:
+        reserved_udp = []
+
+    def _is_reserved_udp(p: int) -> bool:
+        for a, b in reserved_udp:
+            if a <= p <= b:
+                return True
+        return False
+
+    def _alloc_voice_port() -> int:
+        # Simple Voice Chat default is 24454; we allocate per-server to allow multiple servers on one host.
+        for _ in range(20000):
+            cand = int.from_bytes(os.urandom(2), "big")  # 0-65535
+            cand = 20000 + (cand % (65535 - 20000))
+            if cand in used_udp_ports:
+                continue
+            if _is_reserved_udp(cand):
+                continue
+            used_udp_ports.add(cand)
+            return cand
+        # fallback: linear scan
+        for cand in range(20000, 65536):
+            if cand in used_udp_ports:
+                continue
+            if _is_reserved_udp(cand):
+                continue
+            used_udp_ports.add(cand)
+            return cand
+        raise RuntimeError("No free UDP ports left for voice chat")
+
     for s in servers:
         if not s.get("server_id"):
             s["server_id"] = str(uuid.uuid4())
@@ -47,6 +100,20 @@ def read_servers_file() -> list:
             s["folder"] = f"{s['platform']}-{s['version']}-{s['name']}"
             changed = True
 
+        # Ensure edition exists (older servers.json may not have it)
+        if not s.get("edition"):
+            # Best guess: assume java
+            s["edition"] = "java"
+            changed = True
+
+        # Allocate voice port for Java servers so multiple can run concurrently
+        ed = str(s.get("edition") or "")
+        if ed in ("java", "both"):
+            vp = s.get("voice_port")
+            if not isinstance(vp, int) or not (1 <= int(vp) <= 65535):
+                s["voice_port"] = _alloc_voice_port()
+                changed = True
+
     if changed:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -57,9 +124,13 @@ def read_servers_file() -> list:
 
 
 def sync_desired_sticky_servers() -> None:
-    """Best-effort: tell the edge which sticky servers still exist locally (folder exists)."""
+    """Best-effort: tell the edge which sticky servers still exist locally (folder exists).
+
+    Also tells the edge which services each server should reserve ports for.
+    """
     servers = read_servers_file()
-    desired: list[str] = []
+    desired: list[dict] = []
+
     for s in servers:
         if not s.get("sticky_address", True):
             continue
@@ -67,41 +138,45 @@ def sync_desired_sticky_servers() -> None:
         if not folder:
             continue
         server_dir = os.path.join("servers", folder)
-        if os.path.isdir(server_dir):
-            desired.append(str(s["server_id"]))
+        if not os.path.isdir(server_dir):
+            continue
+
+        sid = str(s["server_id"])
+        ed = str(s.get("edition") or "java")
+
+        services: list[dict] = []
+        if ed in ("java", "both"):
+            services.append({"svc": "mc", "proto": "tcp"})
+            services.append({"svc": "voice", "proto": "udp"})
+        if ed in ("bedrock", "both"):
+            services.append({"svc": "bedrock", "proto": "udp"})
+
+        desired.append({"server_id": sid, "services": services})
 
     # de-dupe while preserving order
     seen = set()
     desired_unique = []
-    for sid in desired:
+    for item in desired:
+        sid = item["server_id"]
         if sid in seen:
             continue
         seen.add(sid)
-        desired_unique.append(sid)
+        desired_unique.append(item)
 
-    if desired_unique:
-        TUNNEL.sync_desired(desired_server_ids=desired_unique)
-    else:
-        # still sync empty to allow edge to drop all reservations if user deleted everything
-        TUNNEL.sync_desired(desired_server_ids=[])
+    # Always sync (even empty) so the edge can deallocate orphan sticky ports
+    TUNNEL.sync_desired(desired=desired_unique)
 
 
 def get_per_server_config(platform: str, version: str, name: str) -> dict:
     servers = read_servers_file()
     for server in servers:
-        if (
-            server["platform"] == platform
-            and server["version"] == version
-            and server["name"] == name
-        ):
+        if server.get("platform") == platform and server.get("version") == version and server.get("name") == name:
             return server
     raise ValueError(f"No configuration found for server: {platform}-{version}-{name}")
 
 
 def read_properties(path: str) -> Dict[str, str]:
-    """
-    Reads Minecraft-style key=value files (ignores comments and blanks).
-    """
+    """Reads Minecraft-style key=value files (ignores comments and blanks)."""
     props: Dict[str, str] = {}
     if not os.path.exists(path):
         return props
@@ -115,6 +190,46 @@ def read_properties(path: str) -> Dict[str, str]:
             k, v = line.split("=", 1)
             props[k.strip()] = v.strip()
     return props
+
+
+def write_properties_preserve(path: str, updates: Dict[str, str]) -> None:
+    """Update (or create) a .properties file while preserving existing comments/unknown keys."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    lines: List[str] = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+    out: List[str] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        raw = line.rstrip("\n")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in raw:
+            out.append(line)
+            continue
+        k, _v = raw.split("=", 1)
+        k = k.strip()
+        if k in updates:
+            out.append(f"{k}={updates[k]}\n")
+            seen.add(k)
+        else:
+            out.append(line)
+
+    # append missing keys at end
+    for k, v in updates.items():
+        if k not in seen:
+            out.append(f"{k}={v}\n")
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(out)
+    os.replace(tmp, path)
+
+
+# ---------------- Minecraft readiness helpers ----------------
 
 
 def wait_tcp_open(host: str, port: int, timeout_s: float = 30.0) -> bool:
@@ -141,10 +256,7 @@ _RAKNET_MAGIC = b"\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x
 
 
 def bedrock_udp_ping_once(host: str, port: int, timeout_s: float = 0.8) -> bool:
-    """
-    Sends a RakNet Unconnected Ping (0x01) and expects Unconnected Pong (0x1c).
-    This is the standard way to detect a Bedrock server on UDP.
-    """
+    """Sends a RakNet Unconnected Ping (0x01) and expects Unconnected Pong (0x1c)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.settimeout(timeout_s)
@@ -183,6 +295,74 @@ def wait_bedrock_udp_ready(host: str, port: int, timeout_s: float = 30.0) -> boo
     return False
 
 
+# ---------------- Simple Voice Chat config helpers ----------------
+
+_PLUGIN_PLATFORMS = {
+    "paper",
+    "spigot",
+    "purpur",
+    "pufferfish",
+    "folia",
+    "bukkit",
+}
+
+
+def _voicechat_config_path(server_dir: str, platform: str) -> str:
+    """Return the most likely voicechat-server.properties location.
+
+    Mod loaders: config/voicechat/voicechat-server.properties
+    Plugin servers: plugins/voicechat/voicechat-server.properties
+    """
+    mod_path = os.path.join(server_dir, "config", "voicechat", "voicechat-server.properties")
+    plugin_path = os.path.join(server_dir, "plugins", "voicechat", "voicechat-server.properties")
+
+    if os.path.exists(plugin_path):
+        return plugin_path
+    if os.path.exists(mod_path):
+        return mod_path
+
+    if platform.lower() in _PLUGIN_PLATFORMS:
+        return plugin_path
+    return mod_path
+
+
+def _read_voice_port_from_voicechat_config(path: str) -> Optional[int]:
+    props = read_properties(path)
+    raw = props.get("port")
+    if raw is None:
+        return None
+    try:
+        p = int(raw)
+        if 1 <= p <= 65535:
+            return p
+        return None
+    except Exception:
+        return None
+
+
+def _ensure_voicechat_config(
+    *,
+    server_dir: str,
+    platform: str,
+    voice_local_port: int,
+    public_host: Optional[str],
+) -> None:
+    """Create/update voicechat-server.properties for Simple Voice Chat.
+
+    - Sets port=<voice_local_port> (server bind)
+    - Sets voice_host=<public_host> (client connect target)
+      where public_host may include a port (recommended).
+    """
+    cfg_path = _voicechat_config_path(server_dir, platform)
+    updates: Dict[str, str] = {"port": str(int(voice_local_port))}
+    if public_host:
+        updates["voice_host"] = public_host
+    write_properties_preserve(cfg_path, updates)
+
+
+# ---------------- Main runner ----------------
+
+
 def run_server(edition: str, platform: str, version: str, name: str):
     server_config = get_per_server_config(platform, version, name)
     ram = server_config.get("ram")
@@ -201,6 +381,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
         sync_desired_sticky_servers()
     except Exception as e:
         warn(f"[tunnel] warning: could not sync reservations: {e}")
+
     info(f"Running {edition} server: {platform}-{version}-{name} with {ram}MB RAM and EULA accepted: {eula}")
 
     server_dir = os.path.join("servers", folder)
@@ -212,14 +393,63 @@ def run_server(edition: str, platform: str, version: str, name: str):
     # Java uses server-port
     java_port = int(props.get("server-port", "25565"))
 
-    # Bedrock server.properties also usually uses server-port, but if yours differs, update here.
+    # Bedrock / Geyser generally uses a separate UDP port; older code reused server-port
     bedrock_port = int(props.get("server-port", "19132"))
+
+    # Voice chat local UDP port (per-server so multiple servers can run)
+    voice_local_port: Optional[int] = None
+    if edition in ("java", "both"):
+        # Prefer the existing voicechat config if present, else servers.json voice_port
+        cfg_path = _voicechat_config_path(server_dir, platform)
+        voice_local_port = _read_voice_port_from_voicechat_config(cfg_path)
+        if voice_local_port is None:
+            vp = server_config.get("voice_port")
+            if isinstance(vp, int) and 1 <= int(vp) <= 65535:
+                voice_local_port = int(vp)
+            else:
+                # Last-resort fallback (should be prevented by read_servers_file migration)
+                voice_local_port = 24454
 
     proc: Optional[subprocess.Popen] = None
     tunnel_started = False
+    tunnel_info = None
+
+    # Track readiness to avoid stopping the tunnel during startup
+    tcp_ready_once = False
 
     try:
-        # ---- Start the server process first ----
+        # ---- If Java (or both), open tunnel FIRST so we can write voice_host before the server loads config ----
+        if edition in ("java", "both"):
+            services: List[Dict[str, Any]] = [{"svc": "mc", "proto": "tcp", "local": int(java_port)}]
+
+            if voice_local_port is not None:
+                services.append({"svc": "voice", "proto": "udp", "local": int(voice_local_port)})
+
+            if edition == "both":
+                services.append({"svc": "bedrock", "proto": "udp", "local": int(bedrock_port)})
+
+            try:
+                tunnel_info = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, services=services)
+                tunnel_started = True
+
+                # Configure Simple Voice Chat to advertise the tunnel address/port to clients
+                if voice_local_port is not None:
+                    voice_pub = tunnel_info.public_port("voice") if tunnel_info else None
+                    if voice_pub:
+                        public_host = f"{tunnel_info.subdomain}.{tunnel_info.domain_suffix}:{voice_pub}"
+                        try:
+                            _ensure_voicechat_config(
+                                server_dir=server_dir,
+                                platform=platform,
+                                voice_local_port=int(voice_local_port),
+                                public_host=public_host,
+                            )
+                        except Exception as e:
+                            warn(f"[voicechat] warning: could not write voice chat config: {e}")
+            except Exception as e:
+                warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
+
+        # ---- Start the server process ----
         if edition in ("java", "both"):
             if platform in ["forge", "neoforge"]:
                 run_bat = os.path.join(server_dir, "run.bat")
@@ -236,6 +466,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
                         content = re.sub(r"-Xmx\d+[GMm]", f"-Xmx{ram}M", content)
                         content = re.sub(r"-Xms\d+[GMm]", f"-Xms{ram}M", content)
+
                         content = content.replace("# -Xmx", "-Xmx").replace("# -Xms", "-Xms")
 
                         with open(user_jvm_args, "w", encoding="utf-8") as f:
@@ -308,45 +539,48 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
         assert proc is not None
 
-        # ---- Wait for readiness, THEN start tunnel ----
+        # ---- Readiness + tunnel (bedrock-only starts tunnel after readiness) ----
         if edition == "java":
-            if wait_tcp_open("127.0.0.1", java_port, timeout_s=45.0):
-                try:
-                    info_t = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, tcp_local=java_port)
-                    tunnel_started = True
-                    info(f"[tunnel] Java join: {info_t.public_tcp_address}")
-                except Exception as e:
-                    warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
-            else:
-                warn(f"[tunnel] Server never opened TCP port {java_port}; not starting tunnel.")
+            tcp_ready_once = wait_tcp_open("127.0.0.1", java_port, timeout_s=45.0)
+            if not tcp_ready_once:
+                warn(f"[tunnel] Server never opened TCP port {java_port}; tunnel may not work until it does.")
+            if tunnel_started and tunnel_info and tcp_ready_once:
+                info(f"[tunnel] Java join: {tunnel_info.public_tcp_address}")
+
+                if tunnel_info.public_voice_address:
+                    info(f"[voicechat] Voice should auto-connect (voice_host set). Public voice: {tunnel_info.public_voice_address}")
 
         elif edition == "bedrock":
             if wait_bedrock_udp_ready("127.0.0.1", bedrock_port, timeout_s=45.0):
                 try:
-                    info_t = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, udp_local=bedrock_port)
+                    tunnel_info = TUNNEL.start(
+                        server_id=server_id,
+                        sticky_address=sticky_address,
+                        services=[{"svc": "bedrock", "proto": "udp", "local": int(bedrock_port)}],
+                    )
                     tunnel_started = True
-                    info(f"[tunnel] Bedrock join: {info_t.public_udp_address}")
+                    info(f"[tunnel] Bedrock join: {tunnel_info.public_udp_address}")
                 except Exception as e:
                     warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
             else:
                 warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel.")
 
         elif edition == "both":
-            ok_tcp = wait_tcp_open("127.0.0.1", java_port, timeout_s=45.0)
-            ok_udp = wait_bedrock_udp_ready("127.0.0.1", bedrock_port, timeout_s=45.0)
+            # Wait for both interfaces to come up, but we may already have the tunnel up.
+            tcp_ready_once = wait_tcp_open("127.0.0.1", java_port, timeout_s=45.0)
+            udp_ready = wait_bedrock_udp_ready("127.0.0.1", bedrock_port, timeout_s=45.0)
 
-            if not ok_tcp:
-                warn(f"[tunnel] Java never opened TCP port {java_port}; not starting tunnel (both).")
-            elif not ok_udp:
-                warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel (both).")
-            else:
-                try:
-                    info_t = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, tcp_local=java_port, udp_local=bedrock_port)
-                    tunnel_started = True
-                    info(f"[tunnel] Java join: {info_t.public_tcp_address}")
-                    info(f"[tunnel] Bedrock join: {info_t.public_udp_address}")
-                except Exception as e:
-                    warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
+            if not tcp_ready_once:
+                warn(f"[tunnel] Java never opened TCP port {java_port}; join may fail until it does.")
+            if not udp_ready:
+                warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; Bedrock join may fail until it does.")
+
+            if tunnel_started and tunnel_info and tcp_ready_once:
+                info(f"[tunnel] Java join: {tunnel_info.public_tcp_address}")
+            if tunnel_started and tunnel_info and udp_ready:
+                info(f"[tunnel] Bedrock join: {tunnel_info.public_udp_address}")
+            if tunnel_started and tunnel_info and tunnel_info.public_voice_address:
+                info(f"[voicechat] Voice should auto-connect (voice_host set). Public voice: {tunnel_info.public_voice_address}")
 
         # ---- Monitor: stop tunnel when server exits or java TCP port closes ----
         while True:
@@ -354,7 +588,8 @@ def run_server(edition: str, platform: str, version: str, name: str):
             if code is not None:
                 break
 
-            if tunnel_started and edition in ("java", "both"):
+            # Only stop the tunnel when the server had been ready at least once
+            if tunnel_started and tcp_ready_once and edition in ("java", "both"):
                 if not is_tcp_open("127.0.0.1", java_port):
                     warn(f"[tunnel] Local TCP port {java_port} closed; stopping tunnel.")
                     TUNNEL.stop()

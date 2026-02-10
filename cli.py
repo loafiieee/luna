@@ -1,15 +1,19 @@
+from pathlib import Path
 import sys
 from typing import List
 
-from backend.utils.get_versions import list_versions
-from backend.utils.get_platforms import list_platforms
-from backend.utils.get_reseved_ports import get_reserved_ports
-from backend.scripts.server_installer import install_server
-from backend.scripts.run_server import run_server, sync_desired_sticky_servers
-from backend.scripts.delete_server import delete_server
+from backend.utils.get_versions import *
+from backend.utils.get_platforms import *
+from backend.utils.get_reseved_ports import *
+from backend.scripts.server_installer import *
+from backend.scripts.run_server import *
+from backend.scripts.delete_server import *
+
+# Modrinth support
+from backend.utils.modrinth import *
 
 # Logging/event emitter (supports human + JSON)
-from backend.utils.emit import set_json_mode, info, warn, error, event
+from backend.utils.emit import *
 
 
 def _parse_bool(v: str) -> bool:
@@ -133,8 +137,149 @@ def main(argv: List[str]) -> int:
         print(get_reserved_ports(protocol))
         return 0
 
+    # ---- Modrinth CLI ----
+    # Keep compatibility with the original CLI you wrote:
+    #   modrinth_search <query> [--project_type=...] [--loader=...] [--game_version=...] [--category=...]
+    #   modrinth_project <project_id>
+    #   modrinth_download <server_folder> <project_id> [--loader=...] [--game_version=...]
+    #
+    # (Newer/extra commands can be added later, but these should remain stable.)
+
+    if cmd == "modrinth_search":
+        if len(argv) < 3:
+            error("Usage: cli.py modrinth_search <query> [--project_type=mod|plugin|modpack|resourcepack|shader] [--loader=loader] [--game_version=version] [--category=category]")
+            return 1
+
+        query = argv[2]
+        project_type = None
+        loaders = []
+        game_versions = []
+        categories = []
+        for arg in argv[3:]:
+            if arg.startswith("--project_type="):
+                project_type = arg.split("=", 1)[1]
+            elif arg.startswith("--loader="):
+                loaders.append(arg.split("=", 1)[1])
+            elif arg.startswith("--game_version="):
+                game_versions.append(arg.split("=", 1)[1])
+            elif arg.startswith("--category="):
+                categories.append(arg.split("=", 1)[1])
+            else:
+                error(f"Unknown argument: {arg}")
+                return 1
+
+        client = ModrinthClient()
+        try:
+            results = client.search_projects(
+                query,
+                project_type=project_type,
+                loaders=loaders if loaders else None,
+                game_versions=game_versions if game_versions else None,
+                categories=categories if categories else None,
+            )
+        except ModrinthError as e:
+            error(str(e))
+            return 1
+
+        print(results)
+        return 0
+
+    if cmd == "modrinth_project":
+        if len(argv) < 3:
+            error("Usage: cli.py modrinth_project <project_id>")
+            return 1
+
+        project_id = argv[2]
+        client = ModrinthClient()
+        try:
+            project = client.get_project(project_id)
+        except ModrinthError as e:
+            error(str(e))
+            return 1
+
+        print(project)
+        return 0
+
+    if cmd == "modrinth_download":
+        if len(argv) < 4:
+            error("Usage: cli.py modrinth_download <server_folder> <project_id> [--loader=loader] [--game_version=version]")
+            return 1
+
+        server_folder = argv[2]
+        project_id = argv[3]
+        loaders = []
+        game_versions = []
+        for arg in argv[4:]:
+            if arg.startswith("--loader="):
+                loaders.append(arg.split("=", 1)[1])
+            elif arg.startswith("--game_version="):
+                game_versions.append(arg.split("=", 1)[1])
+            else:
+                error(f"Unknown argument: {arg}")
+                return 1
+
+        # Resolve latest matching version
+        client = ModrinthClient()
+        try:
+            versions = client.get_project_versions(
+                project_id,
+                loaders=loaders if loaders else None,
+                game_versions=game_versions if game_versions else None,
+            )
+        except ModrinthError as e:
+            error(str(e))
+            return 1
+
+        if not versions:
+            error("No matching versions found for the specified criteria.")
+            return 1
+
+        latest_version = versions[0]
+        files = latest_version.get("files", []) or []
+        if not files:
+            error("No downloadable files found for the latest version.")
+            return 1
+
+        # Prefer primary file if present, else first
+        chosen = next((f for f in files if f.get("primary")), None) or files[0]
+        download_url = chosen.get("url")
+        filename = chosen.get("filename")
+        if not download_url or not filename:
+            error("No download URL/filename found for the selected file.")
+            return 1
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        # Original behavior installed into plugins/. If plugins/ doesn't exist, fall back to mods/.
+        plugins_dir = server_path / "plugins"
+        mods_dir = server_path / "mods"
+        if plugins_dir.exists():
+            out_dir = plugins_dir
+        elif mods_dir.exists():
+            out_dir = mods_dir
+        else:
+            # Default to plugins to preserve the original intent.
+            out_dir = plugins_dir
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        info(f"Downloading from {download_url}...")
+        try:
+            out_file = download_file(download_url, out_dir / filename)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        if out_file:
+            info(f"Downloaded {out_file} successfully.")
+        return 0
     if cmd == "help":
-        info("Available commands: get_versions, install_server, get_platforms, run_server, delete_server, get_reserved_ports")
+        info(
+            "Available commands: get_versions, install_server, get_platforms, run_server, delete_server, get_reserved_ports, "
+            "modrinth_search, modrinth_project, modrinth_download"
+        )
         info("Add --json to output machine-readable JSON events")
         return 0
 

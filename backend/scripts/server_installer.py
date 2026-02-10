@@ -128,16 +128,67 @@ def server_exists(platform: str, version: str, name: str) -> bool:
                 return True
     return False
 
-def update_servers_json(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, port: int, sticky_address: bool = True):
+def update_servers_json(
+    edition: str,
+    platform: str,
+    version: str,
+    name: str,
+    RAM: int,
+    EULA: bool,
+    port: int,
+    sticky_address: bool = True,
+    voice_port: int | None = None,
+):
     print("Updating servers.json...")
     servers_file = Path("servers/servers.json")
     if servers_file.exists():
-        with open(servers_file, 'r', encoding='utf-8') as f:
+        with open(servers_file, "r", encoding="utf-8") as f:
             servers = json.load(f)
     else:
         servers = []
+
     # Generate a stable ID per installed server instance
     server_id = str(uuid.uuid4())
+
+    # Allocate a per-server Simple Voice Chat UDP port (Java servers only)
+    if voice_port is None and edition in ("java", "both"):
+        used: set[int] = set()
+        try:
+            for s in servers:
+                vp = s.get("voice_port")
+                if isinstance(vp, int):
+                    used.add(vp)
+                p = s.get("port")
+                if isinstance(p, int):
+                    used.add(p)
+        except Exception:
+            pass
+        used.add(int(port))
+
+        reserved = []
+        try:
+            # Local UDP reserved ports (Windows excluded ranges, etc.)
+            reserved = get_reserved_ports("udp")
+        except Exception:
+            reserved = []
+
+        def is_reserved(p: int) -> bool:
+            for a, b in reserved:
+                if a <= p <= b:
+                    return True
+            return False
+
+        for _ in range(20000):
+            cand = random.randint(24454, 65535)
+            if cand in used:
+                continue
+            if is_reserved(cand):
+                continue
+            voice_port = cand
+            break
+
+        if voice_port is None:
+            raise RuntimeError("Could not allocate a free UDP port for Simple Voice Chat")
 
     server_info = {
         "server_id": server_id,
@@ -149,11 +200,15 @@ def update_servers_json(edition: str, platform: str, version: str, name: str, RA
         "ram": RAM,
         "eula": EULA,
         "folder": f"{platform}-{version}-{name}",
-        "port": port
+        "port": int(port),
     }
+
+    if voice_port is not None:
+        server_info["voice_port"] = int(voice_port)
+
     servers.append(server_info)
 
-    with open(servers_file, 'w', encoding='utf-8') as f:
+    with open(servers_file, "w", encoding="utf-8") as f:
         json.dump(servers, f, indent=4)
 
 def install_server(edition: str, platform: str, version: str, name: str, RAM: int, EULA: bool, sticky_address: bool = True) -> Path:
@@ -178,7 +233,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
         used_ports = [server.get("port", 0) for server in servers]
 
     # get a list of all OS-reserved ports and add them to a seperate list
-    if edition == "java" or "both":
+    if edition in ("java", "both"):
         reserved_ports = get_reserved_ports("tcp")
         for start, end in reserved_ports:
             used_ports.extend(range(start, end + 1))

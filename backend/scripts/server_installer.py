@@ -317,7 +317,7 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
             java_download(platform, version, name, RAM, EULA, port=create_port)
 
         elif edition == "bedrock":
-            bedrock_download(name, RAM, EULA)
+            bedrock_download(platform, version, name, RAM, EULA)
 
         elif edition == "both":
             geyser_download(platform, version, name, RAM, EULA)
@@ -674,14 +674,14 @@ def _pick_geyser_plugin_url(mc_version: str) -> str:
 
     raise RuntimeError("No downloadable Geyser plugin file found")
 
-def bedrock_download(name: str, RAM: int, EULA: bool):
+def bedrock_download(platform: str, version: str, name: str, RAM: int, EULA: bool):
     print("Downloading Bedrock server...")
     if os.name != 'nt':
         raise RuntimeError("Bedrock server installation is only supported on Windows.")
     if not EULA:
         raise ValueError("EULA not accepted")
 
-    server_dir = Path(f"servers/bedrock-bedrock-{name}")
+    server_dir = Path(f"servers/{platform}-{version}-{name}")
     zip_path = server_dir / "bedrock-server.zip"
     download_file("https://www.minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.132.3.zip", zip_path)
     with zipfile.ZipFile(zip_path, "r") as zf:

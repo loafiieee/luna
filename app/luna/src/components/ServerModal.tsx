@@ -1,5 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
@@ -230,7 +234,7 @@ export function ServerModal({
 
         <div style={styles.centerPane}>
           {tab === "details" && <DetailsPane server={server} />}
-          {tab === "console" && <PlaceholderPane title="Console" desc="Coming next (PTY + xterm)." />}
+          {tab === "console" && <ConsolePane server={server} addLog={addLog} />}
           {tab === "content" && (
             <PlaceholderPane title="Content" desc="Plugins / Mods / Datapacks UI scaffold (Modrinth later)." />
           )}
@@ -243,7 +247,7 @@ export function ServerModal({
         <div style={styles.rightPane}>
           <div style={styles.playersHeader}>
             <div style={{ fontWeight: 900 }}>Online Players</div>
-            <div style={{ opacity: 0.7 }}>{(isOnline && typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}</div>
+            <div style={{ opacity: 0.7 }}>{(typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}</div>
           </div>
 
           <input
@@ -330,6 +334,141 @@ function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
         )}
       </div>
       <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis" }}>{name}</div>
+    </div>
+  );
+}
+
+function ConsolePane({
+  server,
+  addLog,
+}: {
+  server: ServerInfo;
+  addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const pollerRef = useRef<number | null>(null);
+  const offsetRef = useRef<number>(0);
+  const [command, setCommand] = useState("");
+  const [sending, setSending] = useState(false);
+  const [pollErr, setPollErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    offsetRef.current = 0;
+    setPollErr(null);
+  }, [server.server_id]);
+
+  useEffect(() => {
+    const term = new Terminal({
+      convertEol: true,
+      fontSize: 12,
+      cursorBlink: true,
+      theme: {
+        background: "#020617",
+      },
+      scrollback: 5000,
+      disableStdin: true,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    terminalRef.current = term;
+    fitRef.current = fit;
+
+    if (containerRef.current) {
+      term.open(containerRef.current);
+      fit.fit();
+    }
+
+    const poll = async () => {
+      try {
+        const res = await invoke<{ lines: string[]; offset: number }>("read_server_console", {
+          serverId: server.server_id,
+          offset: offsetRef.current,
+          maxLines: 200,
+        });
+        offsetRef.current = res.offset;
+        if (res.lines.length > 0) {
+          for (const line of res.lines) {
+            term.writeln(line);
+          }
+        }
+        setPollErr(null);
+      } catch (e: any) {
+        setPollErr(String(e));
+      }
+    };
+
+    poll();
+    pollerRef.current = window.setInterval(poll, 300);
+
+    let observer: ResizeObserver | null = null;
+    if (containerRef.current && "ResizeObserver" in window) {
+      observer = new ResizeObserver(() => {
+        try {
+          fit.fit();
+        } catch {
+          // ignore
+        }
+      });
+      observer.observe(containerRef.current);
+    }
+
+    return () => {
+      if (pollerRef.current) {
+        window.clearInterval(pollerRef.current);
+        pollerRef.current = null;
+      }
+      observer?.disconnect();
+      term.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+    };
+  }, [server.server_id]);
+
+  async function sendCommand() {
+    if (!command.trim()) return;
+    const out = command.trim();
+    setSending(true);
+    try {
+      await invoke("send_server_console_command", { serverId: server.server_id, command: out });
+      addLog("ok", `Console command sent to "${server.name}": ${out}`);
+      setCommand("");
+    } catch (e: any) {
+      const msg = String(e);
+      addLog("err", `Console command failed for "${server.name}": ${msg}`);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Console</div>
+      <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
+
+      <div style={styles.consoleView} ref={containerRef} />
+
+      <div style={styles.consoleInputRow}>
+        <input
+          style={styles.consoleInput}
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder={server.running ? "say hello" : "Start server to use console commands"}
+          disabled={!server.running || sending}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              sendCommand();
+            }
+          }}
+        />
+        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={!server.running || sending || !command.trim()}>
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </div>
+
+      {pollErr && <div style={styles.consoleError}>Console read error: {pollErr}</div>}
     </div>
   );
 }

@@ -75,7 +75,8 @@ export default function App() {
     setErr(null);
     addLog("info", `Start requested for "${server.name}".`);
     try {
-      await cli("start_server", server.server_id);
+      // run_server edition platform version name
+      await cli("run_server", server.edition, server.platform, server.version, server.name);
       addLog("ok", `Start command sent for "${server.name}".`);
       await refresh();
     } catch (e: any) {

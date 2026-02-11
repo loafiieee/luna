@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
@@ -230,7 +231,7 @@ export function ServerModal({
 
         <div style={styles.centerPane}>
           {tab === "details" && <DetailsPane server={server} />}
-          {tab === "console" && <PlaceholderPane title="Console" desc="Coming next (PTY + xterm)." />}
+          {tab === "console" && <ConsolePane server={server} addLog={addLog} />}
           {tab === "content" && (
             <PlaceholderPane title="Content" desc="Plugins / Mods / Datapacks UI scaffold (Modrinth later)." />
           )}
@@ -330,6 +331,113 @@ function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
         )}
       </div>
       <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis" }}>{name}</div>
+    </div>
+  );
+}
+
+function ConsolePane({
+  server,
+  addLog,
+}: {
+  server: ServerInfo;
+  addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
+}) {
+  const [lines, setLines] = useState<string[]>([]);
+  const offsetRef = useRef(0);
+  const [command, setCommand] = useState("");
+  const [sending, setSending] = useState(false);
+  const [pollErr, setPollErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLines([]);
+    offsetRef.current = 0;
+    setPollErr(null);
+  }, [server.server_id]);
+
+  useEffect(() => {
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const res = await invoke<{ lines: string[]; offset: number }>("read_server_console", {
+          serverId: server.server_id,
+          offset: offsetRef.current,
+          maxLines: 250,
+        });
+        if (!active) return;
+
+        offsetRef.current = res.offset;
+        setPollErr(null);
+        if (res.lines.length > 0) {
+          setLines((prev) => [...prev, ...res.lines].slice(-700));
+        }
+      } catch (e: any) {
+        if (!active) return;
+        setPollErr(String(e));
+      }
+    };
+
+    poll();
+    const id = window.setInterval(poll, 900);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [server.server_id]);
+
+  async function sendCommand() {
+    if (!command.trim()) return;
+    const out = command.trim();
+    setSending(true);
+    try {
+      await invoke("send_server_console_command", { serverId: server.server_id, command: out });
+      addLog("ok", `Console command sent to "${server.name}": ${out}`);
+      setCommand("");
+    } catch (e: any) {
+      const msg = String(e);
+      addLog("err", `Console command failed for "${server.name}": ${msg}`);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Console</div>
+      <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
+
+      <div style={styles.consoleView}>
+        {lines.length === 0 ? (
+          <div style={styles.consoleEmpty}>{server.running ? "Waiting for console output…" : "Server is offline."}</div>
+        ) : (
+          lines.map((line, i) => (
+            <div key={`${i}-${line.slice(0, 16)}`} style={styles.consoleLine}>
+              {line}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div style={styles.consoleInputRow}>
+        <input
+          style={styles.consoleInput}
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder={server.running ? "say hello" : "Start server to use console commands"}
+          disabled={!server.running || sending}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              sendCommand();
+            }
+          }}
+        />
+        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={!server.running || sending || !command.trim()}>
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </div>
+
+      {pollErr && <div style={styles.consoleError}>Console read error: {pollErr}</div>}
     </div>
   );
 }

@@ -5,13 +5,19 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 
 class ServersState:
     """Locking + atomic helpers for servers/servers.json."""
 
-    def __init__(self, path: str | Path = "servers/servers.json") -> None:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+
+    def set_path(self, path: str | Path) -> None:
+        """Update the state file path (useful when switching data roots)."""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
@@ -84,7 +90,20 @@ class ServersState:
             os.replace(tmp_path, self.path)
         finally:
             if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
 
-STATE = ServersState()
+def _default_state_path() -> Path:
+    # Prefer the resolved data-root path if available
+    try:
+        from backend.utils.paths import servers_state_path
+
+        return servers_state_path()
+    except Exception:
+        return Path("servers") / "servers.json"
+
+
+STATE = ServersState(_default_state_path())

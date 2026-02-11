@@ -1,0 +1,179 @@
+import { useMemo, useState } from "react";
+import type { DetailTab, ServerInfo } from "./lib/types";
+import { GlobalReset } from "./components/GlobalReset";
+import { styles } from "./styles/styles";
+import { btn } from "./components/ui";
+import { useLogs } from "./hooks/useLogs";
+import { useServers } from "./hooks/useServers";
+import { ServerCard } from "./components/ServerCard";
+import { Overlay } from "./components/Overlay";
+import { ServerModal } from "./components/ServerModal";
+import { LogsBar } from "./components/LogsBar";
+import { cli } from "./lib/cli";
+
+export default function App() {
+  const { logs, addLog, clearLogs, endRef } = useLogs();
+  const { sortedServers, loading, refresh } = useServers(addLog);
+
+  const [selected, setSelected] = useState<ServerInfo | null>(null);
+  const [tab, setTab] = useState<DetailTab>("details");
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function publicAddressFor(server: ServerInfo): string {
+    const rt: any = server.runtime ?? {};
+    const t: any = rt.tunnel ?? {};
+
+    const tcp = typeof t.public_tcp_address === "string" ? t.public_tcp_address : null;
+    const udp = typeof t.public_udp_address === "string" ? t.public_udp_address : null;
+
+    // If both edition: show ONE host:port if they match
+    if (server.edition === "both") {
+      if (tcp && udp && tcp === udp) return tcp;
+      // if your device side sets only one, still show it
+      return tcp ?? udp ?? "";
+    }
+
+    if (server.edition === "bedrock") return udp ?? tcp ?? "";
+    return tcp ?? udp ?? "";
+  }
+
+  function serverAddress(server: ServerInfo): string {
+    const pub = publicAddressFor(server);
+    if (pub) return pub;
+    // fallback if tunneling missing
+    return `127.0.0.1:${server.port}`;
+  }
+
+  function playersOnline(server: ServerInfo): number | null {
+    const rt: any = server.runtime ?? {};
+    const n =
+      typeof rt.players_online === "number"
+        ? rt.players_online
+        : typeof rt.online_players === "number"
+          ? rt.online_players
+          : null;
+    return n;
+  }
+
+  async function startServer(server: ServerInfo) {
+    setErr(null);
+    addLog("info", `Start requested for "${server.name}".`);
+    try {
+      await cli("start_server", server.server_id);
+      addLog("ok", `Start command sent for "${server.name}".`);
+      await refresh();
+    } catch (e: any) {
+      const msg = String(e);
+      setErr(msg);
+      addLog("err", `Start failed: ${msg}`);
+    }
+  }
+
+  async function stopServer(server: ServerInfo) {
+    setErr(null);
+    addLog("info", `Stop requested for "${server.name}".`);
+    try {
+      await cli("stop_server", server.server_id);
+      addLog("ok", `Stop command sent for "${server.name}".`);
+      await refresh();
+    } catch (e: any) {
+      const msg = String(e);
+      setErr(msg);
+      addLog("err", `Stop failed: ${msg}`);
+    }
+  }
+
+  const content = useMemo(() => {
+    return (
+      <div style={styles.grid}>
+        {sortedServers.length === 0 && !loading ? (
+          <div style={styles.empty}>
+            <div style={{ fontSize: 16, fontWeight: 900 }}>No servers</div>
+            <div style={{ opacity: 0.75, marginTop: 6 }}>
+              Create one with the CLI for now, then hit refresh.
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <button style={btn("primary")} onClick={refresh}>
+                Refresh
+              </button>
+            </div>
+          </div>
+        ) : (
+          sortedServers.map((s) => (
+            <ServerCard
+              key={s.server_id}
+              server={s}
+              onOpen={() => {
+                setSelected(s);
+                setTab("details");
+              }}
+              onStart={() => startServer(s)}
+              onStop={() => stopServer(s)}
+              onlinePlayers={playersOnline(s)}
+            />
+          ))
+        )}
+      </div>
+    );
+  }, [sortedServers, loading, refresh]);
+
+  return (
+    <div style={styles.app}>
+      <GlobalReset />
+
+      <div style={styles.topChrome}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={styles.brandDot} />
+          <div>
+            <div style={styles.brandTitle}>Luna</div>
+            <div style={styles.brandSub}>Minecraft server manager</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button style={btn("ghost")} onClick={() => setLogsOpen(true)}>
+            Logs
+          </button>
+          <button style={btn("primary")} onClick={refresh} disabled={loading}>
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {err && (
+        <div style={styles.errorBox}>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Error</div>
+          <div style={{ whiteSpace: "pre-wrap" }}>{err}</div>
+        </div>
+      )}
+
+      {content}
+
+      {selected && (
+        <Overlay onClose={() => setSelected(null)}>
+          <ServerModal
+            server={selected}
+            tab={tab}
+            setTab={setTab}
+            address={serverAddress(selected)}
+            onlinePlayers={playersOnline(selected)}
+            maxPlayers={"?"}
+            onStart={() => startServer(selected)}
+            onStop={() => stopServer(selected)}
+            onRequestClose={() => setSelected(null)}
+            addLog={addLog}
+          />
+        </Overlay>
+      )}
+
+      <LogsBar
+        open={logsOpen}
+        onToggle={() => setLogsOpen((v) => !v)}
+        onClear={clearLogs}
+        logs={logs}
+        endRef={endRef}
+      />
+    </div>
+  );
+}

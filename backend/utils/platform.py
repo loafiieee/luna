@@ -33,7 +33,14 @@ def exe_suffix() -> str:
 
 
 def data_dir(app_name: str = "luna") -> Path:
-    """OS-correct per-user data directory."""
+    """OS-correct per-user *data* directory.
+
+    - Windows: %APPDATA%/<app_name>
+    - macOS: ~/Library/Application Support/<app_name>
+    - Linux: $XDG_DATA_HOME/<app_name> (fallback ~/.local/share/<app_name>)
+
+    Note: This is where we store large, user-managed data (servers, jars, logs).
+    """
     if is_windows():
         base = Path(os.environ.get("APPDATA") or Path.home())
         return base / app_name
@@ -41,12 +48,12 @@ def data_dir(app_name: str = "luna") -> Path:
     if is_macos():
         return Path.home() / "Library" / "Application Support" / app_name
 
-    # Linux / other unix: prefer XDG_STATE_HOME
-    base = os.environ.get("XDG_STATE_HOME")
+    # Linux / other unix: prefer XDG_DATA_HOME
+    base = os.environ.get("XDG_DATA_HOME")
     if base:
         return Path(base) / app_name
 
-    return Path.home() / ".local" / "state" / app_name
+    return Path.home() / ".local" / "share" / app_name
 
 
 def ensure_data_dir(app_name: str = "luna") -> Path:

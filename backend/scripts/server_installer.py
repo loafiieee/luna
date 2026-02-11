@@ -235,6 +235,7 @@ def update_servers_json(
     server_info = {
         "server_id": server_id,
         "sticky_address": bool(sticky_address),
+        "tunneling": True,
         "edition": edition,
         "platform": platform,
         "version": version,

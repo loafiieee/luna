@@ -35,13 +35,24 @@ def _unpack(b: bytes):
 def _default_identity_path(app_name: str = "luna") -> str:
     """Return path to the local identity file.
 
-    Uses an OS-appropriate per-user data directory when possible.
+    Prefer the configured Luna data root (so portable mode keeps identity alongside data).
+    Fallback to an OS-appropriate per-user directory.
     """
+    # Prefer Luna data root when available
+    try:
+        from backend.utils.paths import get_data_root  # type: ignore
+
+        d = get_data_root()
+        d.mkdir(parents=True, exist_ok=True)
+        return str(Path(d) / "identity.json")
+    except Exception:
+        pass
+
     if ensure_data_dir is not None:
         d = ensure_data_dir(app_name)
         return str(Path(d) / "identity.json")
 
-    # Fallback: keep previous behavior
+    # Last-resort fallback
     appdata = os.environ.get("APPDATA") or "."
     d = os.path.join(appdata, app_name)
     os.makedirs(d, exist_ok=True)
@@ -91,15 +102,12 @@ class TunnelInfo:
             return None
         return f"{self.subdomain}.{self.domain_suffix}:{p}"
 
-    # Backwards-compat helpers (old callers expected these names)
     @property
     def public_tcp(self) -> Optional[int]:
-        # Prefer "mc", then legacy "tcp"
         return self.public_port("mc") or self.public_port("tcp")
 
     @property
     def public_udp(self) -> Optional[int]:
-        # Prefer "bedrock", then legacy "udp"
         return self.public_port("bedrock") or self.public_port("udp")
 
     @property
@@ -137,12 +145,6 @@ def _normalize_services(
     tcp_local: Optional[int] = None,
     udp_local: Optional[int] = None,
 ) -> List[ServiceSpec]:
-    """Build a normalized list of ServiceSpec.
-
-    If services is not provided, fall back to legacy args:
-      - tcp_local => svc="mc", proto="tcp"
-      - udp_local => svc="bedrock", proto="udp"
-    """
     out: List[ServiceSpec] = []
 
     if services is None:
@@ -169,7 +171,6 @@ def _normalize_services(
             raise ValueError(f"service {spec.svc!r} has invalid local port {spec.local}")
         out.append(spec)
 
-    # Ensure unique service names
     seen: set[str] = set()
     for s in out:
         if s.svc in seen:
@@ -179,16 +180,7 @@ def _normalize_services(
     return out
 
 
-# ---------------- UDP helper protocol ----------------
-
-
 class _UdpPerPeerProtocol(asyncio.DatagramProtocol):
-    """One local UDP socket per (service, remote peer).
-
-    This lets replies from the local UDP server be mapped back to the
-    correct internet peer.
-    """
-
     def __init__(self, svc: str, peer: Tuple[str, int], send_to_edge: Callable[[str, Tuple[str, int], bytes], Any]):
         self.svc = svc
         self.peer = peer
@@ -199,27 +191,13 @@ class _UdpPerPeerProtocol(asyncio.DatagramProtocol):
         self.transport = transport  # type: ignore[assignment]
 
     def datagram_received(self, data: bytes, addr) -> None:
-        # addr will be ('127.0.0.1', local_server_port) because we connect() to it
         self.send_to_edge(self.svc, self.peer, data)
 
     def error_received(self, exc: Exception) -> None:
-        # Ignore noisy UDP errors
         pass
 
 
-# ---------------- Tunnel client ----------------
-
-
 class TunnelClient:
-    """Embedded tunnel client.
-
-    Supports multiple named services over a single WS connection.
-      - e.g. "mc" (tcp), "bedrock" (udp), "voice" (udp)
-
-    Works best when run inside an asyncio loop.
-    For synchronous apps, use TunnelRunner below.
-    """
-
     def __init__(
         self,
         edge_url: str,
@@ -227,10 +205,8 @@ class TunnelClient:
         identity_path: Optional[str] = None,
         app_name: str = "luna",
         on_status: Optional[Callable[[str], None]] = None,
-        # UDP peer cleanup
         udp_peer_ttl_s: float = 120.0,
         udp_peer_reap_interval_s: float = 30.0,
-        # Keepalive / reconnect tuning (important when running behind proxies)
         ws_ping_interval_s: float = 15.0,
         ws_ping_timeout_s: float = 15.0,
         app_keepalive_interval_s: float = 25.0,
@@ -251,16 +227,13 @@ class TunnelClient:
 
         self.server_id: Optional[str] = None
         self.sticky_address: bool = True
+        self.share_game_port: bool = False  # NEW
         self.info: Optional[TunnelInfo] = None
         self._open_future: Optional[asyncio.Future[TunnelInfo]] = None
 
-        # Desired services (svc -> spec)
         self._services: Dict[str, ServiceSpec] = {}
-
-        # TCP: (svc, conn_id) -> (reader, writer)
         self._tcp_local: Dict[Tuple[str, int], Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
 
-        # UDP: (svc, peer) -> (protocol/transport, last_seen_monotonic)
         self._udp_peers: Dict[
             Tuple[str, Tuple[str, int]],
             Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport, float],
@@ -268,29 +241,22 @@ class TunnelClient:
         self._udp_peer_ttl_s = float(udp_peer_ttl_s)
         self._udp_peer_reap_interval_s = float(udp_peer_reap_interval_s)
 
-        # WebSocket ping keepalive (low-level)
         self._ws_ping_interval_s = float(ws_ping_interval_s)
         self._ws_ping_timeout_s = float(ws_ping_timeout_s)
 
-        # Active keepalive (forces reconnect on half-open sockets)
         self._app_keepalive_interval_s = float(app_keepalive_interval_s)
         self._app_keepalive_timeout_s = float(app_keepalive_timeout_s)
         self._keepalive_task: Optional[asyncio.Task] = None
 
-        # Reconnect behavior
         self._reconnect_enabled = bool(reconnect)
         self._reconnect_initial_delay_s = float(reconnect_initial_delay_s)
         self._reconnect_max_delay_s = float(reconnect_max_delay_s)
 
-        # Rx tracking (for detecting half-open connections)
         self._last_rx_monotonic: float = time.monotonic()
-
-        # UDP reaper
         self._udp_reaper_task: Optional[asyncio.Task] = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # WS send queue (prevents "task per packet")
         self._ws_send_q: Optional[asyncio.Queue[bytes]] = None
         self._ws_sender_task: Optional[asyncio.Task] = None
 
@@ -304,22 +270,17 @@ class TunnelClient:
         server_id: str,
         sticky_address: bool,
         services: Optional[Sequence[Union[ServiceSpec, Dict[str, Any]]]] = None,
-        # legacy
+        share_game_port: bool = False,  # NEW
         tcp_local: Optional[int] = None,
         udp_local: Optional[int] = None,
     ) -> TunnelInfo:
-        """Start tunnel for one or more services.
-
-        Returns when allocation arrives.
-        Keeps running until close().
-        """
         specs = _normalize_services(services=services, tcp_local=tcp_local, udp_local=udp_local)
 
         if self.main_task and not self.main_task.done():
-            # already running; allow idempotent same config
             same = (
                 self.server_id == server_id
                 and self.sticky_address == bool(sticky_address)
+                and self.share_game_port == bool(share_game_port)
                 and self.info is not None
                 and set(self._services.keys()) == {s.svc for s in specs}
                 and all(self._services[s.svc].proto == s.proto and self._services[s.svc].local == s.local for s in specs)
@@ -331,6 +292,7 @@ class TunnelClient:
         self._services = {s.svc: s for s in specs}
         self.server_id = server_id
         self.sticky_address = bool(sticky_address)
+        self.share_game_port = bool(share_game_port)  # NEW
         self.stop_event.clear()
 
         loop = asyncio.get_running_loop()
@@ -343,18 +305,15 @@ class TunnelClient:
     async def close(self) -> None:
         self.stop_event.set()
 
-        # Close WS (sender task will exit)
         if self.ws:
             try:
                 await self.ws.close()
             except Exception:
                 pass
 
-        # Close TCP locals
         for key in list(self._tcp_local.keys()):
             await self._tcp_close_local(key)
 
-        # Close UDP peer sockets
         for k, (_proto, transport, _ts) in list(self._udp_peers.items()):
             try:
                 transport.close()
@@ -362,17 +321,14 @@ class TunnelClient:
                 pass
             self._udp_peers.pop(k, None)
 
-        # Stop keepalive
         if self._keepalive_task:
             self._keepalive_task.cancel()
             self._keepalive_task = None
 
-        # Stop reaper
         if self._udp_reaper_task:
             self._udp_reaper_task.cancel()
             self._udp_reaper_task = None
 
-        # Stop ws sender
         if self._ws_sender_task:
             self._ws_sender_task.cancel()
             self._ws_sender_task = None
@@ -387,10 +343,8 @@ class TunnelClient:
         self.ws = None
         self.main_task = None
 
-    # ---------------- TCP helpers ----------------
-
     async def _tcp_open_local(self, key: Tuple[str, int]) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        svc, cid = key
+        svc, _cid = key
         spec = self._services.get(svc)
         if spec is None or spec.proto != "tcp":
             raise RuntimeError(f"unknown tcp service {svc!r}")
@@ -410,7 +364,6 @@ class TunnelClient:
             pass
 
     async def _tcp_pump_local_to_edge(self, svc: str, cid: int, reader: asyncio.StreamReader) -> None:
-        # ws can change on reconnect; capture the current one when starting the pump
         ws = self.ws
         if ws is None:
             return
@@ -425,8 +378,6 @@ class TunnelClient:
                 await ws.send(_pack({"t": "tcp_close", "svc": svc, "id": cid}))
             except Exception:
                 pass
-
-    # ---------------- WS send queue helpers ----------------
 
     async def _ws_sender(self) -> None:
         ws = self.ws
@@ -454,10 +405,7 @@ class TunnelClient:
         except Exception:
             pass
 
-    # ---------------- Keepalive / liveness ----------------
-
     async def _keepalive(self) -> None:
-        """Actively ping to keep the WS alive and detect half-open connections."""
         try:
             while not self.stop_event.is_set():
                 await asyncio.sleep(self._app_keepalive_interval_s)
@@ -470,7 +418,6 @@ class TunnelClient:
                     pong_waiter = ws.ping()
                     await asyncio.wait_for(pong_waiter, timeout=self._app_keepalive_timeout_s)
                 except Exception:
-                    # Closing the ws will unwind _run() and trigger reconnect logic.
                     try:
                         await ws.close()
                     except Exception:
@@ -478,8 +425,6 @@ class TunnelClient:
                     break
         except asyncio.CancelledError:
             pass
-
-    # ---------------- UDP helpers ----------------
 
     async def _udp_reaper(self) -> None:
         try:
@@ -497,7 +442,6 @@ class TunnelClient:
             pass
 
     async def _udp_get_peer_socket(self, svc: str, peer: Tuple[str, int]) -> Tuple[_UdpPerPeerProtocol, asyncio.DatagramTransport]:
-        """Create (or reuse) a per-peer local UDP socket connected to 127.0.0.1:<local_udp_port>."""
         assert self._loop is not None
         spec = self._services.get(svc)
         if spec is None or spec.proto != "udp":
@@ -511,26 +455,22 @@ class TunnelClient:
             return proto, transport
 
         def send_to_edge(svc2: str, peer2: Tuple[str, int], data: bytes):
-            # Called from protocol callbacks (same loop thread)
             self._ws_send_nowait({"t": "udp_data", "svc": svc2, "peer": [peer2[0], peer2[1]], "d": data})
 
         proto = _UdpPerPeerProtocol(svc=svc, peer=peer, send_to_edge=send_to_edge)
 
         transport, _ = await self._loop.create_datagram_endpoint(
             lambda: proto,
-            local_addr=("127.0.0.1", 0),  # ephemeral local port
-            remote_addr=("127.0.0.1", int(spec.local)),  # connect to local UDP server
+            local_addr=("127.0.0.1", 0),
+            remote_addr=("127.0.0.1", int(spec.local)),
         )
         transport = transport  # type: ignore[assignment]
         self._udp_peers[key] = (proto, transport, time.monotonic())
         return proto, transport  # type: ignore[return-value]
 
     async def _udp_forward_to_local(self, svc: str, peer: Tuple[str, int], data: bytes) -> None:
-        """Send incoming internet datagram to local UDP server via the per-peer socket."""
         _proto, transport = await self._udp_get_peer_socket(svc, peer)
         transport.sendto(data)
-
-    # ---------------- main loop ----------------
 
     async def _run(self) -> None:
         ident = load_or_create_identity(self.identity_path, self.app_name)
@@ -541,7 +481,6 @@ class TunnelClient:
 
         want: List[dict] = [{"svc": s.svc, "proto": s.proto, "local": int(s.local)} for s in self._services.values()]
 
-        # Exponential backoff for reconnects
         backoff = self._reconnect_initial_delay_s
 
         while not self.stop_event.is_set():
@@ -558,18 +497,14 @@ class TunnelClient:
                     self._last_rx_monotonic = time.monotonic()
                     self._status("connected")
 
-                    # Start sender queue
                     self._ws_send_q = asyncio.Queue()
                     self._ws_sender_task = asyncio.create_task(self._ws_sender())
 
-                    # Start UDP reaper if any UDP services
                     if any(s.proto == "udp" for s in self._services.values()):
                         self._udp_reaper_task = asyncio.create_task(self._udp_reaper())
 
-                    # Start keepalive (detect half-open connections + force timely reconnects)
                     self._keepalive_task = asyncio.create_task(self._keepalive())
 
-                    # (Re)open
                     await ws.send(
                         _pack(
                             {
@@ -579,6 +514,7 @@ class TunnelClient:
                                 "secret": secret,
                                 "server_id": self.server_id,
                                 "sticky_address": bool(self.sticky_address),
+                                "share_game_port": bool(self.share_game_port),  # NEW
                                 "want": want,
                             }
                         )
@@ -604,26 +540,20 @@ class TunnelClient:
                                 public = int(rec.get("public"))
                                 services_info[str(svc)] = TunnelServiceInfo(svc=str(svc), proto=proto, public=public)
                             elif isinstance(rec, int):
-                                # legacy response (ports: {"tcp": 123, "udp": 456})
                                 key = str(svc)
                                 if key == "tcp":
                                     services_info["mc"] = TunnelServiceInfo(svc="mc", proto="tcp", public=int(rec))
                                 elif key == "udp":
                                     services_info["bedrock"] = TunnelServiceInfo(svc="bedrock", proto="udp", public=int(rec))
-                    info = TunnelInfo(
-                        subdomain=sub,
-                        domain_suffix=self.domain_suffix,
-                        services=services_info,
-                    )
+
+                    info = TunnelInfo(subdomain=sub, domain_suffix=self.domain_suffix, services=services_info)
                     self.info = info
 
                     if self._open_future and not self._open_future.done():
                         self._open_future.set_result(info)
 
-                    # Successful connection => reset backoff
                     backoff = self._reconnect_initial_delay_s
 
-                    # Process messages
                     async for raw in ws:
                         if self.stop_event.is_set():
                             break
@@ -632,7 +562,6 @@ class TunnelClient:
                         msg = _unpack(raw)
                         t = msg.get("t")
 
-                        # ---- TCP ----
                         if t == "tcp_accept":
                             svc = str(msg.get("svc") or "mc")
                             cid = int(msg["id"])
@@ -655,7 +584,6 @@ class TunnelClient:
                             cid = int(msg["id"])
                             await self._tcp_close_local((svc, cid))
 
-                        # ---- UDP ----
                         elif t == "udp_data":
                             svc = str(msg.get("svc") or "bedrock")
                             peer_list = msg["peer"]
@@ -666,31 +594,25 @@ class TunnelClient:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                # Only surface open() failures once; after that we just reconnect.
                 self._status(f"error: {e}")
                 if self._open_future and not self._open_future.done():
                     self._open_future.set_exception(e)
             finally:
-                # Stop keepalive
                 if self._keepalive_task:
                     self._keepalive_task.cancel()
                     self._keepalive_task = None
 
-                # Stop sender
                 if self._ws_sender_task:
                     self._ws_sender_task.cancel()
                     self._ws_sender_task = None
                 self._ws_send_q = None
 
-                # Stop reaper
                 if self._udp_reaper_task:
                     self._udp_reaper_task.cancel()
                     self._udp_reaper_task = None
 
-                # Close WS reference
                 self.ws = None
 
-                # Tear down local state (TCP/UDP) so reconnect starts cleanly
                 for key in list(self._tcp_local.keys()):
                     try:
                         await self._tcp_close_local(key)
@@ -706,11 +628,9 @@ class TunnelClient:
 
             if self.stop_event.is_set():
                 break
-
             if not self._reconnect_enabled:
                 break
 
-            # Reconnect after a short backoff
             self._status("reconnecting")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2.0, self._reconnect_max_delay_s)
@@ -718,13 +638,8 @@ class TunnelClient:
         self._status("stopped")
 
 
-# ---------------- Synchronous wrapper (so run_server can call it) ----------------
-
-
 @dataclass
 class TunnelRunner:
-    """Synchronous-friendly runner. Use start() from normal (non-async) code."""
-
     edge_url: str = "wss://tunnel.loafiieee.com"
     domain_suffix: str = "mc.loafiieee.com"
     app_name: str = "luna"
@@ -754,12 +669,12 @@ class TunnelRunner:
         server_id: str,
         sticky_address: bool,
         services: Optional[Sequence[Union[ServiceSpec, Dict[str, Any]]]] = None,
-        # legacy
+        share_game_port: bool = False,  # NEW
         tcp_local: Optional[int] = None,
         udp_local: Optional[int] = None,
         timeout: float = 10.0,
     ) -> TunnelInfo:
-        self.stop()  # stop any existing tunnel first
+        self.stop()
         self._ensure_loop()
 
         assert self._loop is not None
@@ -775,6 +690,7 @@ class TunnelRunner:
                 server_id=server_id,
                 sticky_address=sticky_address,
                 services=services,
+                share_game_port=share_game_port,  # NEW
                 tcp_local=tcp_local,
                 udp_local=udp_local,
             ),
@@ -787,17 +703,9 @@ class TunnelRunner:
         self,
         *,
         desired: Optional[List[Dict[str, Any]]] = None,
-        # legacy
         desired_server_ids: Optional[List[str]] = None,
         timeout: float = 8.0,
     ) -> None:
-        """One-shot: tell the edge which sticky server_ids still exist locally.
-
-        New format:
-          desired = [{"server_id": "...", "services": [{"svc":"mc","proto":"tcp"}, ...]}, ...]
-        Legacy format:
-          desired_server_ids = ["...", ...]
-        """
         self._ensure_loop()
         assert self._loop is not None
 

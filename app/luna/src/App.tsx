@@ -40,9 +40,18 @@ export default function App() {
 
   function serverAddress(server: ServerInfo): string {
     const pub = publicAddressFor(server);
-    if (pub) return pub;
-    // fallback if tunneling missing
-    return `127.0.0.1:${server.port}`;
+    return pub;
+  }
+
+  function maxPlayersFor(server: ServerInfo): string {
+    const rt: any = server.runtime ?? {};
+    const candidate =
+      rt.max_players ??
+      rt.players_max ??
+      rt.maxPlayers ??
+      rt.player_limit ??
+      (server as any).max_players;
+    return typeof candidate === "number" && candidate > 0 ? String(candidate) : "?";
   }
 
   function playersOnline(server: ServerInfo): number | null {
@@ -83,6 +92,11 @@ export default function App() {
       addLog("err", `Stop failed: ${msg}`);
     }
   }
+
+  const selectedServer = useMemo(() => {
+    if (!selected) return null;
+    return sortedServers.find((s) => s.server_id === selected.server_id) ?? selected;
+  }, [selected, sortedServers]);
 
   const content = useMemo(() => {
     return (
@@ -150,17 +164,17 @@ export default function App() {
 
       {content}
 
-      {selected && (
+      {selectedServer && (
         <Overlay onClose={() => setSelected(null)}>
           <ServerModal
-            server={selected}
+            server={selectedServer}
             tab={tab}
             setTab={setTab}
-            address={serverAddress(selected)}
-            onlinePlayers={playersOnline(selected)}
-            maxPlayers={"?"}
-            onStart={() => startServer(selected)}
-            onStop={() => stopServer(selected)}
+            address={serverAddress(selectedServer)}
+            onlinePlayers={playersOnline(selectedServer)}
+            maxPlayers={maxPlayersFor(selectedServer)}
+            onStart={() => startServer(selectedServer)}
+            onStop={() => stopServer(selectedServer)}
             onRequestClose={() => setSelected(null)}
             addLog={addLog}
           />

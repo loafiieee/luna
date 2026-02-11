@@ -9,6 +9,7 @@ export function ServerCard({
   onStart,
   onStop,
   onlinePlayers,
+  maxPlayers,
   actionBusy,
   isOnline,
 }: {
@@ -17,20 +18,22 @@ export function ServerCard({
   onStart: () => void;
   onStop: () => void;
   onlinePlayers: number | null;
+  maxPlayers: string;
   actionBusy: boolean;
   isOnline: boolean;
 }) {
   const icon = serverIconUrl(server);
+  const defaultIcon = new URL("/default-server-icon.png", window.location.origin).toString();
 
   return (
     <div style={styles.card} onClick={onOpen}>
       <div style={styles.cardIconWrap}>
         <img
-          src={icon ?? "/default-server-icon.png"}
+          src={icon ?? defaultIcon}
           alt="server icon"
           style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
           onError={(e) => {
-            (e.currentTarget as HTMLImageElement).src = "/default-server-icon.png";
+            (e.currentTarget as HTMLImageElement).src = defaultIcon;
           }}
         />
 
@@ -42,9 +45,7 @@ export function ServerCard({
           <div style={styles.cardName}>{server.name}</div>
           <div style={styles.cardMetaRow}>
             {isOnline ? pill("Online", "ok") : pill("Offline", "muted")}
-            {isOnline && typeof onlinePlayers === "number" ? (
-              <span style={styles.playerHint}>{onlinePlayers} player{onlinePlayers === 1 ? "" : "s"}</span>
-            ) : null}
+            {isOnline ? <span style={styles.playerHint}>{typeof onlinePlayers === "number" ? onlinePlayers : 0}/{maxPlayers}</span> : null}
           </div>
         </div>
 

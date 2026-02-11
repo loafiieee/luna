@@ -466,7 +466,7 @@ function ConsolePane({
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           placeholder={isOnline ? "say hello" : actionBusy ? "Waiting for server to start…" : "Start server to use console commands"}
-          disabled={!isOnline || sending || actionBusy}
+          disabled={(!isOnline && !actionBusy) || sending}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -474,7 +474,7 @@ function ConsolePane({
             }
           }}
         />
-        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={!isOnline || sending || actionBusy || !command.trim()}>
+        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={(!isOnline && !actionBusy) || sending || !command.trim()}>
           {sending ? "Sending…" : "Send"}
         </button>
       </div>

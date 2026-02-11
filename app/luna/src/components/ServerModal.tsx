@@ -38,8 +38,9 @@ export function ServerModal({
   onRename,
   onDelete,
   addLog,
+  isOnline,
+  actionBusy,
 }: ServerModalProps) {
-  const isOnline = !!server.running;
   const derivedIconPath =
     server.icon_path ||
     (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
@@ -188,11 +189,12 @@ export function ServerModal({
           <button
             style={btn(isOnline ? "danger" : "primary")}
             onClick={() => {
-              addLog("info", `${isOnline ? "Stop" : "Start"} clicked for "${server.name}".`);
+              addLog("info", `${actionBusy ? (isOnline ? "Stopping…" : "Starting…") : (isOnline ? "Stop" : "Start")} clicked for "${server.name}".`);
               isOnline ? onStop() : onStart();
             }}
+            disabled={actionBusy}
           >
-            {isOnline ? "Stop" : "Start"}
+            {actionBusy ? (isOnline ? "Stopping…" : "Starting…") : (isOnline ? "Stop" : "Start")}
           </button>
 
           <button
@@ -238,7 +240,7 @@ export function ServerModal({
 
         <div style={styles.centerPane}>
           {tab === "details" && <DetailsPane server={server} />}
-          {tab === "console" && <ConsolePane server={server} addLog={addLog} />}
+          {tab === "console" && <ConsolePane server={server} addLog={addLog} isOnline={isOnline} actionBusy={actionBusy} />}
           {tab === "content" && (
             <PlaceholderPane title="Content" desc="Plugins / Mods / Datapacks UI scaffold (Modrinth later)." />
           )}
@@ -345,9 +347,13 @@ function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
 function ConsolePane({
   server,
   addLog,
+  isOnline,
+  actionBusy,
 }: {
   server: ServerInfo;
   addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
+  isOnline: boolean;
+  actionBusy: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -450,6 +456,7 @@ function ConsolePane({
     <div>
       <div style={styles.paneTitle}>Console</div>
       <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
+      {!isOnline && actionBusy && <div style={{ marginTop: 8, opacity: 0.8 }}>Waiting for server to start…</div>}
 
       <div style={styles.consoleView} ref={containerRef} />
 
@@ -458,8 +465,8 @@ function ConsolePane({
           style={styles.consoleInput}
           value={command}
           onChange={(e) => setCommand(e.target.value)}
-          placeholder={server.running ? "say hello" : "Start server to use console commands"}
-          disabled={!server.running || sending}
+          placeholder={isOnline ? "say hello" : actionBusy ? "Waiting for server to start…" : "Start server to use console commands"}
+          disabled={!isOnline || sending || actionBusy}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
@@ -467,7 +474,7 @@ function ConsolePane({
             }
           }}
         />
-        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={!server.running || sending || !command.trim()}>
+        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={!isOnline || sending || actionBusy || !command.trim()}>
           {sending ? "Sending…" : "Send"}
         </button>
       </div>

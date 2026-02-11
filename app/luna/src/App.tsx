@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { DetailTab, ServerInfo } from "./lib/types";
 import { GlobalReset } from "./components/GlobalReset";
 import { styles } from "./styles/styles";
@@ -50,10 +51,15 @@ export default function App() {
     addLog("info", `Start requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
-      // run_server edition platform version name
-      await cli("run_server", server.edition, server.platform, server.version, server.name);
-      addLog("ok", `Start command sent for "${server.name}".`);
-      await refresh();
+      await invoke("pty_start", {
+        serverId: server.server_id,
+        cols: 120,
+        rows: 30,
+      });
+      addLog("info", `Waiting for server "${server.name}" to start…`);
+      window.setTimeout(() => {
+        void refresh({ silent: true });
+      }, 350);
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);
@@ -70,7 +76,7 @@ export default function App() {
     try {
       await cli("stop_server", server.server_id);
       addLog("ok", `Stop command sent for "${server.name}".`);
-      await refresh();
+      void refresh({ silent: true });
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);
@@ -86,7 +92,7 @@ export default function App() {
     try {
       await cli("rename_server", server.server_id, name);
       addLog("ok", `Renamed server to "${name}".`);
-      await refresh();
+      void refresh({ silent: true });
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);
@@ -103,7 +109,7 @@ export default function App() {
       await cli("delete_server", server.platform, server.version, server.name);
       addLog("ok", `Deleted server "${server.name}".`);
       setSelected(null);
-      await refresh();
+      void refresh({ silent: true });
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);

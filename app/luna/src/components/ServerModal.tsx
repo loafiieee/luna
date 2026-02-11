@@ -14,6 +14,7 @@ export function ServerModal({
   onStart,
   onStop,
   onRequestClose,
+  onRename,
   addLog,
 }: {
   server: ServerInfo;
@@ -25,13 +26,21 @@ export function ServerModal({
   onStart: () => void;
   onStop: () => void;
   onRequestClose: () => void;
+  onRename: (name: string) => Promise<void>;
   addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
 }) {
   const isOnline = !!server.running;
-  const icon = server.icon_path ? convertFileSrc(server.icon_path) : null;
+  const derivedIconPath =
+    server.icon_path ||
+    (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
+    (server.server_dir ? `${server.server_dir}/icon.png` : null);
+  const icon = derivedIconPath ? convertFileSrc(derivedIconPath) : null;
 
   const [playerSearch, setPlayerSearch] = useState("");
   const [copiedAddress, setCopiedAddress] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(server.name);
+  const [renaming, setRenaming] = useState(false);
 
   const players: Array<{ name: string; head_url?: string }> = useMemo(() => {
     const rt = server.runtime ?? {};
@@ -54,10 +63,32 @@ export function ServerModal({
   }, [players, playerSearch]);
 
   useEffect(() => {
+    setNameDraft(server.name);
+  }, [server.name]);
+
+  useEffect(() => {
     if (!copiedAddress) return;
     const t = window.setTimeout(() => setCopiedAddress(false), 1600);
     return () => window.clearTimeout(t);
   }, [copiedAddress]);
+
+
+
+  async function submitRename() {
+    const next = nameDraft.trim();
+    if (!next || next === server.name) {
+      setEditingName(false);
+      setNameDraft(server.name);
+      return;
+    }
+    try {
+      setRenaming(true);
+      await onRename(next);
+      setEditingName(false);
+    } finally {
+      setRenaming(false);
+    }
+  }
 
   async function copyAddress() {
     if (!address) return;
@@ -92,7 +123,36 @@ export function ServerModal({
 
           <div style={{ minWidth: 0 }}>
             <div style={styles.modalTitleRow}>
-              <div style={styles.modalName}>{server.name}</div>
+              {editingName ? (
+                <input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitRename();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setEditingName(false);
+                      setNameDraft(server.name);
+                    }
+                  }}
+                  onBlur={submitRename}
+                  disabled={renaming}
+                  style={styles.modalNameInput}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setEditingName(true)}
+                  title="Click to rename"
+                  style={styles.modalNameButton}
+                >
+                  {server.name}
+                </button>
+              )}
               <div style={{ marginLeft: 10 }}>{isOnline ? pill("Online", "ok") : pill("Offline", "muted")}</div>
             </div>
           </div>

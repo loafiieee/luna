@@ -10,6 +10,7 @@ from backend.scripts.server_installer import *
 from backend.scripts.run_server import *
 from backend.scripts.delete_server import *
 from backend.utils.paths import servers_dir, runtime_state_path
+from backend.utils.state import STATE
 
 # Modrinth support
 from backend.utils.modrinth import *
@@ -223,6 +224,28 @@ def _enrich_servers_for_ui(servers: list[dict]) -> list[dict]:
         enriched.append(item)
 
     return enriched
+
+
+def _rename_server(server_id: str, new_name: str) -> dict:
+    cleaned = new_name.strip()
+    if not cleaned:
+        raise ValueError("Server name cannot be empty")
+
+    found: dict | None = None
+
+    def _mut(servers: list[dict]) -> list[dict]:
+        nonlocal found
+        for s in servers:
+            if str(s.get("server_id")) == str(server_id):
+                s["name"] = cleaned
+                found = dict(s)
+                break
+        return servers
+
+    STATE.mutate(_mut)
+    if not found:
+        raise ValueError(f"Server {server_id} not found")
+    return found
 
 def main(argv: List[str]) -> int:
     # Global flags
@@ -475,6 +498,20 @@ def main(argv: List[str]) -> int:
             info(f"Downloaded {out_file} successfully.")
         return 0
     
+    if cmd == "rename_server":
+        if len(argv) < 4:
+            error("Usage: cli.py rename_server <server_id> <new_name>")
+            return 1
+        server_id = argv[2]
+        new_name = " ".join(argv[3:])
+        try:
+            updated = _rename_server(server_id, new_name)
+        except Exception as e:
+            error(str(e))
+            return 1
+        info(updated)
+        return 0
+
     if cmd == "list_servers":
         servers = read_servers_file()
         info(_enrich_servers_for_ui(servers))

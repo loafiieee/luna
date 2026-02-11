@@ -51,7 +51,12 @@ export default function App() {
       rt.maxPlayers ??
       rt.player_limit ??
       (server as any).max_players;
-    return typeof candidate === "number" && candidate > 0 ? String(candidate) : "?";
+    if (typeof candidate === "number" && candidate > 0) return String(candidate);
+    if (typeof candidate === "string") {
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed) && parsed > 0) return String(parsed);
+    }
+    return "?";
   }
 
   function playersOnline(server: ServerInfo): number | null {
@@ -93,6 +98,20 @@ export default function App() {
     }
   }
 
+
+  async function renameServer(server: ServerInfo, name: string) {
+    setErr(null);
+    try {
+      await cli("rename_server", server.server_id, name);
+      addLog("ok", `Renamed server to "${name}".`);
+      await refresh();
+    } catch (e: any) {
+      const msg = String(e);
+      setErr(msg);
+      addLog("err", `Rename failed: ${msg}`);
+      throw e;
+    }
+  }
   const selectedServer = useMemo(() => {
     if (!selected) return null;
     return sortedServers.find((s) => s.server_id === selected.server_id) ?? selected;
@@ -176,6 +195,7 @@ export default function App() {
             onStart={() => startServer(selectedServer)}
             onStop={() => stopServer(selectedServer)}
             onRequestClose={() => setSelected(null)}
+            onRename={(name) => renameServer(selectedServer, name)}
             addLog={addLog}
           />
         </Overlay>

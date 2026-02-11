@@ -187,6 +187,32 @@ export const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
   },
 
+  modalNameButton: {
+    border: "none",
+    background: "transparent",
+    padding: 0,
+    margin: 0,
+    color: "rgba(255,255,255,.92)",
+    fontSize: 16,
+    fontWeight: 950,
+    cursor: "text",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    textAlign: "left",
+  },
+
+  modalNameInput: {
+    borderRadius: 10,
+    border: "1px solid rgba(59,130,246,.6)",
+    background: "rgba(255,255,255,.08)",
+    color: "rgba(255,255,255,.95)",
+    fontSize: 15,
+    fontWeight: 900,
+    padding: "6px 10px",
+    minWidth: 180,
+  },
+
   modalSubtitle: {
     marginTop: 4,
     fontSize: 12,

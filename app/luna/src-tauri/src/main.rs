@@ -25,6 +25,33 @@ fn app_data_dir() -> Result<PathBuf, String> {
   Ok(PathBuf::from(appdata).join("luna"))
 }
 
+
+fn parse_cli_json_output(stdout: &str) -> Result<Value, String> {
+  // CLI may emit newline-delimited JSON events; prefer the final result event.
+  let mut parsed: Vec<Value> = Vec::new();
+  for line in stdout.lines() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+      parsed.push(v);
+    }
+  }
+
+  if parsed.is_empty() {
+    return Err(format!("Failed to parse JSON from CLI output. Raw: {stdout}"));
+  }
+
+  for v in parsed.iter().rev() {
+    if v.get("event").and_then(|e| e.as_str()) == Some("result") {
+      return Ok(v.clone());
+    }
+  }
+
+  Ok(parsed.pop().expect("parsed is non-empty"))
+}
+
 #[tauri::command]
 fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
   let cli = find_cli_exe()?;
@@ -46,7 +73,7 @@ fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
   }
 
   let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-  serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse JSON: {e}\nRaw: {stdout}"))
+  parse_cli_json_output(&stdout)
 }
 
 fn main() {

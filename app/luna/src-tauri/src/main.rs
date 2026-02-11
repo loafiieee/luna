@@ -1,12 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use once_cell::sync::Lazy;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+  collections::HashMap,
   fs::{File, OpenOptions},
-  io::{BufRead, BufReader, Seek, SeekFrom, Write},
+  io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
   path::PathBuf,
   process::Command,
+  sync::{Arc, Mutex},
+  thread,
 };
 
 fn find_cli_exe() -> Result<PathBuf, String> {
@@ -41,9 +46,65 @@ struct ConsoleReadResult {
   offset: u64,
 }
 
+#[derive(Serialize)]
+struct PtyStartResult {
+  pty_id: String,
+}
+
+#[derive(Serialize)]
+struct PtyPollResult {
+  chunks: Vec<String>,
+  exited: bool,
+}
+
+#[derive(Serialize)]
+struct PtyStatusResult {
+  running: bool,
+}
+
+struct PtySession {
+  child: Box<dyn Child + Send>,
+  master: Box<dyn MasterPty + Send>,
+  writer: Box<dyn Write + Send>,
+  chunks: Arc<Mutex<Vec<String>>>,
+}
+
+static PTY_SESSIONS: Lazy<Mutex<HashMap<String, PtySession>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn load_server_from_state(server_id: &str) -> Result<(String, String, String, String), String> {
+  let servers_path = app_data_dir()?.join("servers").join("servers.json");
+  let raw = std::fs::read_to_string(&servers_path).map_err(|e| e.to_string())?;
+  let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+  let list = parsed
+    .as_array()
+    .ok_or_else(|| "servers.json is not a JSON array".to_string())?;
+
+  for item in list {
+    if item.get("server_id").and_then(|v| v.as_str()) == Some(server_id) {
+      let edition = item.get("edition").and_then(|v| v.as_str()).unwrap_or("java").to_string();
+      let platform = item
+        .get("platform")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "server missing platform".to_string())?
+        .to_string();
+      let version = item
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "server missing version".to_string())?
+        .to_string();
+      let name = item
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "server missing name".to_string())?
+        .to_string();
+      return Ok((edition, platform, version, name));
+    }
+  }
+
+  Err(format!("Server {} not found", server_id))
+}
 
 fn parse_cli_json_output(stdout: &str) -> Result<Value, String> {
-  // CLI may emit newline-delimited JSON events; prefer the final result event.
   let mut parsed: Vec<Value> = Vec::new();
   for line in stdout.lines() {
     let trimmed = line.trim();
@@ -90,6 +151,145 @@ fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
 
   let stdout = String::from_utf8_lossy(&output.stdout).to_string();
   parse_cli_json_output(&stdout)
+}
+
+#[tauri::command]
+fn pty_start(server_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<PtyStartResult, String> {
+  let pty_id = server_id.clone();
+  let (edition, platform, version, name) = load_server_from_state(&server_id)?;
+  let cli = find_cli_exe()?;
+  let data_dir = app_data_dir()?;
+
+  let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
+  if sessions.contains_key(&pty_id) {
+    return Ok(PtyStartResult { pty_id });
+  }
+
+  let pty_system = native_pty_system();
+  let pair = pty_system
+    .openpty(PtySize {
+      rows: rows.unwrap_or(24),
+      cols: cols.unwrap_or(100),
+      pixel_width: 0,
+      pixel_height: 0,
+    })
+    .map_err(|e| e.to_string())?;
+
+  let mut cmd = CommandBuilder::new(cli);
+  cmd.arg("--json");
+  cmd.arg("--data-dir");
+  cmd.arg(data_dir.to_string_lossy().to_string());
+  cmd.arg("run_server");
+  cmd.arg(edition);
+  cmd.arg(platform);
+  cmd.arg(version);
+  cmd.arg(name);
+
+  let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+  let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+  let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+  let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+  let chunks_for_thread = chunks.clone();
+
+  thread::spawn(move || {
+    let mut buf = [0u8; 8192];
+    loop {
+      match reader.read(&mut buf) {
+        Ok(0) => break,
+        Ok(n) => {
+          let txt = String::from_utf8_lossy(&buf[..n]).to_string();
+          if let Ok(mut c) = chunks_for_thread.lock() {
+            c.push(txt);
+            if c.len() > 800 {
+              let drop_n = c.len() - 800;
+              c.drain(0..drop_n);
+            }
+          }
+        }
+        Err(_) => break,
+      }
+    }
+  });
+
+  sessions.insert(
+    pty_id.clone(),
+    PtySession {
+      child,
+      master: pair.master,
+      writer,
+      chunks,
+    },
+  );
+
+  Ok(PtyStartResult { pty_id })
+}
+
+#[tauri::command]
+fn pty_write(pty_id: String, data: String) -> Result<(), String> {
+  let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
+  let session = sessions
+    .get_mut(&pty_id)
+    .ok_or_else(|| format!("No PTY session for {}", pty_id))?;
+  session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+  session.writer.flush().map_err(|e| e.to_string())?;
+  Ok(())
+}
+
+#[tauri::command]
+fn pty_poll(pty_id: String) -> Result<PtyPollResult, String> {
+  let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
+  let session = sessions
+    .get_mut(&pty_id)
+    .ok_or_else(|| format!("No PTY session for {}", pty_id))?;
+
+  let exited = session.child.try_wait().map_err(|e| e.to_string())?.is_some();
+  let mut out = Vec::new();
+  if let Ok(mut c) = session.chunks.lock() {
+    out = std::mem::take(&mut *c);
+  }
+
+  Ok(PtyPollResult { chunks: out, exited })
+}
+
+#[tauri::command]
+fn pty_resize(pty_id: String, cols: u16, rows: u16) -> Result<(), String> {
+  let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
+  let session = sessions
+    .get_mut(&pty_id)
+    .ok_or_else(|| format!("No PTY session for {}", pty_id))?;
+  session
+    .master
+    .resize(PtySize {
+      rows,
+      cols,
+      pixel_width: 0,
+      pixel_height: 0,
+    })
+    .map_err(|e| e.to_string())?;
+  Ok(())
+}
+
+#[tauri::command]
+fn pty_status(pty_id: String) -> Result<PtyStatusResult, String> {
+  let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
+  let session = match sessions.get_mut(&pty_id) {
+    Some(s) => s,
+    None => return Ok(PtyStatusResult { running: false }),
+  };
+  let running = session.child.try_wait().map_err(|e| e.to_string())?.is_none();
+  Ok(PtyStatusResult { running })
+}
+
+#[tauri::command]
+fn pty_stop(pty_id: String) -> Result<(), String> {
+  let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
+  let mut session = sessions
+    .remove(&pty_id)
+    .ok_or_else(|| format!("No PTY session for {}", pty_id))?;
+  let _ = session.writer.write_all(b"stop\n");
+  let _ = session.writer.flush();
+  session.child.kill().map_err(|e| e.to_string())?;
+  Ok(())
 }
 
 #[tauri::command]
@@ -161,7 +361,17 @@ fn send_server_console_command(server_id: String, command: String) -> Result<(),
 
 fn main() {
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![run_cli_json, read_server_console, send_server_console_command])
+    .invoke_handler(tauri::generate_handler![
+      run_cli_json,
+      pty_start,
+      pty_write,
+      pty_poll,
+      pty_resize,
+      pty_status,
+      pty_stop,
+      read_server_console,
+      send_server_console_command
+    ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }

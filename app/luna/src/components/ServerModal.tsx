@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
+import { Terminal } from "xterm";
+import { FitAddon } from "xterm-addon-fit";
+import "xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
@@ -342,46 +345,122 @@ function ConsolePane({
   server: ServerInfo;
   addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
 }) {
-  const [lines, setLines] = useState<string[]>([]);
-  const offsetRef = useRef(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const ptyIdRef = useRef<string | null>(null);
+  const pollerRef = useRef<number | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [command, setCommand] = useState("");
   const [sending, setSending] = useState(false);
   const [pollErr, setPollErr] = useState<string | null>(null);
 
   useEffect(() => {
-    setLines([]);
-    offsetRef.current = 0;
     setPollErr(null);
   }, [server.server_id]);
 
   useEffect(() => {
-    let active = true;
+    const term = new Terminal({
+      convertEol: true,
+      fontSize: 12,
+      cursorBlink: true,
+      theme: {
+        background: "#020617",
+      },
+      scrollback: 5000,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    terminalRef.current = term;
+    fitRef.current = fit;
 
-    const poll = async () => {
+    if (containerRef.current) {
+      term.open(containerRef.current);
+      fit.fit();
+    }
+
+    const start = async () => {
       try {
-        const res = await invoke<{ lines: string[]; offset: number }>("read_server_console", {
+        const started = await invoke<{ pty_id: string }>("pty_start", {
           serverId: server.server_id,
-          offset: offsetRef.current,
-          maxLines: 250,
+          cols: term.cols,
+          rows: term.rows,
         });
-        if (!active) return;
-
-        offsetRef.current = res.offset;
+        ptyIdRef.current = started.pty_id;
         setPollErr(null);
-        if (res.lines.length > 0) {
-          setLines((prev) => [...prev, ...res.lines].slice(-700));
-        }
       } catch (e: any) {
-        if (!active) return;
         setPollErr(String(e));
       }
     };
 
-    poll();
-    const id = window.setInterval(poll, 900);
+    const poll = async () => {
+      const ptyId = ptyIdRef.current;
+      if (!ptyId) return;
+      try {
+        const res = await invoke<{ chunks: string[]; exited: boolean }>("pty_poll", { ptyId });
+        if (res.chunks.length > 0) {
+          for (const chunk of res.chunks) {
+            term.write(chunk);
+          }
+        }
+        if (res.exited) {
+          term.writeln("\r\n[session exited]");
+          if (pollerRef.current) {
+            window.clearInterval(pollerRef.current);
+            pollerRef.current = null;
+          }
+        }
+        setPollErr(null);
+      } catch (e: any) {
+        setPollErr(String(e));
+      }
+    };
+
+    start();
+    pollerRef.current = window.setInterval(poll, 250);
+
+    if (containerRef.current && "ResizeObserver" in window) {
+      const observer = new ResizeObserver(() => {
+        try {
+          fit.fit();
+          const ptyId = ptyIdRef.current;
+          if (ptyId) {
+            invoke("pty_resize", { ptyId, cols: term.cols, rows: term.rows });
+          }
+        } catch {
+          // ignore
+        }
+      });
+      observer.observe(containerRef.current);
+      resizeObserverRef.current = observer;
+    }
+
+    term.onData((data: string) => {
+      const ptyId = ptyIdRef.current;
+      if (ptyId) {
+        invoke("pty_write", { ptyId, data }).catch(() => {
+          // ignore write errors in key stream
+        });
+      }
+    });
+
     return () => {
-      active = false;
-      window.clearInterval(id);
+      if (pollerRef.current) {
+        window.clearInterval(pollerRef.current);
+        pollerRef.current = null;
+      }
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
+      const ptyId = ptyIdRef.current;
+      if (ptyId) {
+        invoke("pty_stop", { ptyId }).catch(() => {
+          // ignore
+        });
+      }
+      ptyIdRef.current = null;
+      term.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
     };
   }, [server.server_id]);
 
@@ -390,7 +469,11 @@ function ConsolePane({
     const out = command.trim();
     setSending(true);
     try {
-      await invoke("send_server_console_command", { serverId: server.server_id, command: out });
+      const ptyId = ptyIdRef.current;
+      if (!ptyId) {
+        throw new Error("PTY session is not ready yet");
+      }
+      await invoke("pty_write", { ptyId, data: `${out}\n` });
       addLog("ok", `Console command sent to "${server.name}": ${out}`);
       setCommand("");
     } catch (e: any) {
@@ -406,17 +489,7 @@ function ConsolePane({
       <div style={styles.paneTitle}>Console</div>
       <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
 
-      <div style={styles.consoleView}>
-        {lines.length === 0 ? (
-          <div style={styles.consoleEmpty}>{server.running ? "Waiting for console output…" : "Server is offline."}</div>
-        ) : (
-          lines.map((line, i) => (
-            <div key={`${i}-${line.slice(0, 16)}`} style={styles.consoleLine}>
-              {line}
-            </div>
-          ))
-        )}
-      </div>
+      <div style={styles.consoleView} ref={containerRef} />
 
       <div style={styles.consoleInputRow}>
         <input

@@ -44,6 +44,7 @@ export function ServerModal({
   const [nameDraft, setNameDraft] = useState(server.name);
   const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 
   const players: Array<{ name: string; head_url?: string }> = useMemo(() => {
     const rt = server.runtime ?? {};
@@ -93,12 +94,15 @@ export function ServerModal({
     }
   }
 
-  async function deleteCurrentServer() {
-    const confirmed = window.confirm(`Delete "${server.name}"? This removes the server files.`);
-    if (!confirmed) return;
+  function deleteCurrentServer() {
+    setConfirmDeleteOpen(true);
+  }
+
+  async function confirmDeleteServer() {
     try {
       setDeleting(true);
       await onDelete();
+      setConfirmDeleteOpen(false);
     } finally {
       setDeleting(false);
     }
@@ -261,6 +265,35 @@ export function ServerModal({
           </div>
         </div>
       </div>
+
+      {confirmDeleteOpen && (
+        <div style={styles.confirmOverlay}>
+          <div style={styles.confirmCard}>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>Delete server?</div>
+            <div style={{ marginTop: 8, opacity: 0.78, lineHeight: 1.4 }}>
+              This removes <b>{server.name}</b> and its server files. This cannot be undone.
+            </div>
+            <div style={styles.confirmActions}>
+              <button
+                type="button"
+                style={btn("ghost")}
+                onClick={() => setConfirmDeleteOpen(false)}
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                style={btn("danger")}
+                onClick={confirmDeleteServer}
+                disabled={deleting}
+              >
+                {deleting ? "Deleting…" : "Delete server"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

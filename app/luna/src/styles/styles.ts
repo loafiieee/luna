@@ -134,6 +134,7 @@ export const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(10,14,26,.92)",
     boxShadow: "0 30px 90px rgba(0,0,0,.70)",
+    position: "relative",
   },
 
   modalTopBar: {
@@ -260,6 +261,32 @@ export const styles: Record<string, React.CSSProperties> = {
     display: "grid",
     gridTemplateColumns: "200px 1fr 300px",
     minHeight: 520,
+  },
+
+  confirmOverlay: {
+    position: "absolute",
+    inset: 0,
+    background: "rgba(0,0,0,.58)",
+    display: "grid",
+    placeItems: "center",
+    zIndex: 20,
+    padding: 20,
+  },
+
+  confirmCard: {
+    width: "min(520px, 100%)",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(12,16,28,.98)",
+    padding: 16,
+    boxShadow: "0 20px 60px rgba(0,0,0,.55)",
+  },
+
+  confirmActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 14,
   },
 
   leftNav: {

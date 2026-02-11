@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -8,6 +9,7 @@ from backend.utils.get_reseved_ports import *
 from backend.scripts.server_installer import *
 from backend.scripts.run_server import *
 from backend.scripts.delete_server import *
+from backend.utils.paths import servers_dir, runtime_state_path
 
 # Modrinth support
 from backend.utils.modrinth import *
@@ -144,6 +146,83 @@ def _download_with_required_dependencies(
 
     return downloaded
 
+
+
+def _safe_read_json(path: Path) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8")
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_server_properties(path: Path) -> dict[str, str]:
+    props: dict[str, str] = {}
+    if not path.exists():
+        return props
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            props[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return props
+
+
+def _enrich_servers_for_ui(servers: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    base_servers_dir = servers_dir()
+
+    for s in servers:
+        item = dict(s)
+        folder = str(item.get("folder") or "")
+        server_id = str(item.get("server_id") or "")
+
+        server_dir = base_servers_dir / folder if folder else None
+        if server_dir is not None:
+            item["server_dir"] = str(server_dir)
+
+            icon_candidates = [
+                server_dir / "server-icon.png",
+                server_dir / "icon.png",
+                server_dir / "pack.png",
+            ]
+            for icon in icon_candidates:
+                if icon.exists() and icon.is_file():
+                    item["icon_path"] = str(icon)
+                    break
+
+            props = _load_server_properties(server_dir / "server.properties")
+            raw_max_players = props.get("max-players")
+            try:
+                if raw_max_players is not None:
+                    item["max_players"] = int(raw_max_players)
+            except Exception:
+                pass
+
+        if server_id:
+            rt_path = runtime_state_path(server_id)
+            runtime = _safe_read_json(rt_path)
+            if runtime:
+                item["runtime"] = runtime
+
+            state = str((item.get("runtime") or {}).get("state") or "").lower()
+            if state in {"running", "starting"}:
+                item["running"] = True
+            elif state in {"stopped", "stopping", "error", "crashed"}:
+                item["running"] = False
+
+            pid = (item.get("runtime") or {}).get("server_pid")
+            if isinstance(pid, int):
+                item["pid"] = pid
+
+        enriched.append(item)
+
+    return enriched
 
 def main(argv: List[str]) -> int:
     # Global flags
@@ -398,7 +477,7 @@ def main(argv: List[str]) -> int:
     
     if cmd == "list_servers":
         servers = read_servers_file()
-        info(servers)
+        info(_enrich_servers_for_ui(servers))
         return 0
 
     if cmd == "help":

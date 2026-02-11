@@ -1,7 +1,7 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
+import { serverIconUrl } from "../lib/serverRuntime";
 
 export function ServerCard({
   server,
@@ -9,35 +9,31 @@ export function ServerCard({
   onStart,
   onStop,
   onlinePlayers,
+  actionBusy,
+  isOnline,
 }: {
   server: ServerInfo;
   onOpen: () => void;
   onStart: () => void;
   onStop: () => void;
   onlinePlayers: number | null;
+  actionBusy: boolean;
+  isOnline: boolean;
 }) {
-  const isOnline = !!server.running;
-  const derivedIconPath =
-    server.icon_path ||
-    (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
-    (server.server_dir ? `${server.server_dir}/icon.png` : null);
-  const icon = derivedIconPath ? convertFileSrc(derivedIconPath) : null;
+  const icon = serverIconUrl(server);
 
   return (
     <div style={styles.card} onClick={onOpen}>
       <div style={styles.cardIconWrap}>
-        {icon ? (
-          <img
-            src={icon}
-            alt="server icon"
-            style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
-          />
-        ) : (
-          <div style={styles.cardIconPlaceholder}>
-            <div style={{ fontWeight: 900, opacity: 0.85 }}>{server.platform}</div>
-            <div style={{ fontSize: 12, opacity: 0.7 }}>{server.version}</div>
-          </div>
-        )}
+        <img
+          src={icon ?? "/default-server-icon.png"}
+          alt="server icon"
+          style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
+          onError={(e) => {
+            (e.currentTarget as HTMLImageElement).src = "/default-server-icon.png";
+          }}
+        />
+
         <div style={styles.cardIconShade} />
       </div>
 
@@ -59,8 +55,9 @@ export function ServerCard({
             isOnline ? onStop() : onStart();
           }}
           title={isOnline ? "Stop" : "Start"}
+          disabled={actionBusy}
         >
-          {isOnline ? "■" : "▶"}
+          {actionBusy ? "…" : isOnline ? "■" : "▶"}
         </button>
       </div>
     </div>

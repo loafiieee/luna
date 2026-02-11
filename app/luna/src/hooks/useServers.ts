@@ -20,44 +20,51 @@ export function useServers(addLog: (lvl: any, msg: string) => void) {
     });
   }, [servers]);
 
-  const refresh = useCallback(async () => {
-    if (inFlightRef.current) {
-      return inFlightRef.current;
-    }
-
-    const run = (async () => {
-      setLoading(true);
-      addLog("info", "Refreshing server list…");
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      try {
-        const res = await cli<{ servers: ServerInfo[] }>("list_servers");
-        const next = res.data.servers ?? [];
-        setServers(next);
-        saveCachedServers(next);
-        addLog("ok", `Loaded ${next.length} server(s).`);
-      } catch (e: any) {
-        addLog("err", `Refresh failed: ${String(e)}`);
-      } finally {
-        setLoading(false);
-        inFlightRef.current = null;
+  const refresh = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (inFlightRef.current) {
+        return inFlightRef.current;
       }
-    })();
 
-    inFlightRef.current = run;
-    return run;
-  }, [addLog]);
+      const run = (async () => {
+        if (!silent) {
+          setLoading(true);
+          addLog("info", "Refreshing server list…");
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
 
-  // Stale-while-revalidate on startup
+        try {
+          const res = await cli<{ servers: ServerInfo[] }>("list_servers");
+          const next = res.data.servers ?? [];
+          setServers(next);
+          saveCachedServers(next);
+          if (!silent) {
+            addLog("ok", `Loaded ${next.length} server(s).`);
+          }
+        } catch (e: any) {
+          if (!silent) {
+            addLog("err", `Refresh failed: ${String(e)}`);
+          }
+        } finally {
+          setLoading(false);
+          inFlightRef.current = null;
+        }
+      })();
+
+      inFlightRef.current = run;
+      return run;
+    },
+    [addLog],
+  );
+
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  // Keep runtime state (running/offline/player counts) fresh.
   useEffect(() => {
     const id = window.setInterval(() => {
-      refresh();
-    }, 2000);
+      refresh({ silent: true });
+    }, 10000);
     return () => window.clearInterval(id);
   }, [refresh]);
 

@@ -10,6 +10,7 @@ import { Overlay } from "./components/Overlay";
 import { ServerModal } from "./components/ServerModal";
 import { LogsBar } from "./components/LogsBar";
 import { cli } from "./lib/cli";
+import { isServerOnline, maxPlayersFor, playersOnline } from "./lib/serverRuntime";
 
 export default function App() {
   const { logs, addLog, clearLogs, endRef } = useLogs();
@@ -19,6 +20,7 @@ export default function App() {
   const [tab, setTab] = useState<DetailTab>("details");
   const [logsOpen, setLogsOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [actionServerId, setActionServerId] = useState<string | null>(null);
 
   function publicAddressFor(server: ServerInfo): string {
     const rt: any = server.runtime ?? {};
@@ -43,37 +45,10 @@ export default function App() {
     return pub;
   }
 
-  function maxPlayersFor(server: ServerInfo): string {
-    const rt: any = server.runtime ?? {};
-    const candidate =
-      rt.maxPlayers ??
-      rt.max_players ??
-      rt.maxplayers ??
-      rt.players_max ??
-      rt.player_limit ??
-      (server as any).max_players;
-    if (typeof candidate === "number" && candidate > 0) return String(candidate);
-    if (typeof candidate === "string") {
-      const parsed = Number(candidate);
-      if (Number.isFinite(parsed) && parsed > 0) return String(parsed);
-    }
-    return "?";
-  }
-
-  function playersOnline(server: ServerInfo): number | null {
-    const rt: any = server.runtime ?? {};
-    const n =
-      typeof rt.players_online === "number"
-        ? rt.players_online
-        : typeof rt.online_players === "number"
-          ? rt.online_players
-          : null;
-    return n;
-  }
-
   async function startServer(server: ServerInfo) {
     setErr(null);
     addLog("info", `Start requested for "${server.name}".`);
+    setActionServerId(server.server_id);
     try {
       // run_server edition platform version name
       await cli("run_server", server.edition, server.platform, server.version, server.name);
@@ -83,12 +58,15 @@ export default function App() {
       const msg = String(e);
       setErr(msg);
       addLog("err", `Start failed: ${msg}`);
+    } finally {
+      setActionServerId((curr) => (curr === server.server_id ? null : curr));
     }
   }
 
   async function stopServer(server: ServerInfo) {
     setErr(null);
     addLog("info", `Stop requested for "${server.name}".`);
+    setActionServerId(server.server_id);
     try {
       await cli("stop_server", server.server_id);
       addLog("ok", `Stop command sent for "${server.name}".`);
@@ -97,6 +75,8 @@ export default function App() {
       const msg = String(e);
       setErr(msg);
       addLog("err", `Stop failed: ${msg}`);
+    } finally {
+      setActionServerId((curr) => (curr === server.server_id ? null : curr));
     }
   }
 
@@ -146,7 +126,7 @@ export default function App() {
               Create one with the CLI for now, then hit refresh.
             </div>
             <div style={{ marginTop: 12 }}>
-              <button style={btn("primary")} onClick={refresh}>
+              <button style={btn("primary")} onClick={() => refresh()}>
                 Refresh
               </button>
             </div>
@@ -163,12 +143,14 @@ export default function App() {
               onStart={() => startServer(s)}
               onStop={() => stopServer(s)}
               onlinePlayers={playersOnline(s)}
+              actionBusy={actionServerId === s.server_id}
+              isOnline={isServerOnline(s)}
             />
           ))
         )}
       </div>
     );
-  }, [sortedServers, loading, refresh]);
+  }, [actionServerId, sortedServers, loading, refresh]);
 
   return (
     <div style={styles.app}>
@@ -187,7 +169,7 @@ export default function App() {
           <button style={btn("ghost")} onClick={() => setLogsOpen(true)}>
             Logs
           </button>
-          <button style={btn("primary")} onClick={refresh} disabled={loading}>
+          <button style={btn("primary")} onClick={() => refresh()} disabled={loading}>
             {loading ? "Refreshing…" : "Refresh"}
           </button>
         </div>
@@ -213,6 +195,8 @@ export default function App() {
             maxPlayers={maxPlayersFor(selectedServer)}
             onStart={() => startServer(selectedServer)}
             onStop={() => stopServer(selectedServer)}
+            actionBusy={actionServerId === selectedServer.server_id}
+            isOnline={isServerOnline(selectedServer)}
             onRequestClose={() => setSelected(null)}
             onRename={(name) => renameServer(selectedServer, name)}
             onDelete={() => deleteServer(selectedServer)}

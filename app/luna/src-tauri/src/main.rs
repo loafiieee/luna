@@ -381,8 +381,8 @@ fn send_server_console_command(server_id: String, command: String) -> Result<(),
     .map_err(|e| e.to_string())?;
 
   let payload = serde_json::json!({
-    "type": "stdin",
-    "data": format!("{}\n", trimmed),
+    "t": "stdin",
+    "line": trimmed,
   });
 
   writeln!(file, "{}", payload).map_err(|e| e.to_string())?;

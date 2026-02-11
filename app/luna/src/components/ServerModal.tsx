@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
@@ -7,6 +7,23 @@ import "@xterm/xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
+
+export type ServerModalProps = {
+  server: ServerInfo;
+  tab: DetailTab;
+  setTab: Dispatch<SetStateAction<DetailTab>>;
+  address: string;
+  onlinePlayers: number | null;
+  maxPlayers: string;
+  onStart: () => void;
+  onStop: () => void;
+  onRequestClose: () => void;
+  onRename: (name: string) => Promise<void>;
+  actionBusy: boolean;
+  isOnline: boolean;
+  onDelete: () => Promise<void>;
+  addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
+};
 
 export function ServerModal({
   server,
@@ -21,20 +38,7 @@ export function ServerModal({
   onRename,
   onDelete,
   addLog,
-}: {
-  server: ServerInfo;
-  tab: DetailTab;
-  setTab: (t: DetailTab) => void;
-  address: string;
-  onlinePlayers: number | null;
-  maxPlayers: string;
-  onStart: () => void;
-  onStop: () => void;
-  onRequestClose: () => void;
-  onRename: (name: string) => Promise<void>;
-  onDelete: () => Promise<void>;
-  addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
-}) {
+}: ServerModalProps) {
   const isOnline = !!server.running;
   const derivedIconPath =
     server.icon_path ||

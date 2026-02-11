@@ -187,6 +187,32 @@ export const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
   },
 
+  modalNameButton: {
+    border: "none",
+    background: "transparent",
+    padding: 0,
+    margin: 0,
+    color: "rgba(255,255,255,.92)",
+    fontSize: 16,
+    fontWeight: 950,
+    cursor: "text",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    textAlign: "left",
+  },
+
+  modalNameInput: {
+    borderRadius: 10,
+    border: "1px solid rgba(59,130,246,.6)",
+    background: "rgba(255,255,255,.08)",
+    color: "rgba(255,255,255,.95)",
+    fontSize: 15,
+    fontWeight: 900,
+    padding: "6px 10px",
+    minWidth: 180,
+  },
+
   modalSubtitle: {
     marginTop: 4,
     fontSize: 12,
@@ -199,18 +225,24 @@ export const styles: Record<string, React.CSSProperties> = {
     gap: 12,
   },
 
-  topSeparator: {
-    width: 1,
-    height: 26,
-    background: "rgba(255,255,255,.12)",
+  addrButton: {
+    minWidth: 240,
+    maxWidth: 360,
+    padding: "8px 10px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.04)",
+    color: "rgba(255,255,255,.92)",
+    textAlign: "left",
+    cursor: "pointer",
   },
 
-  addrWrap: {
-    minWidth: 220,
-    maxWidth: 320,
+  addrButtonCopied: {
+    border: "1px solid rgba(34,197,94,.7)",
+    background: "rgba(34,197,94,.12)",
   },
 
-  addrLabel: { fontSize: 11, opacity: 0.65, fontWeight: 800 },
+  addrLabel: { fontSize: 11, opacity: 0.7, fontWeight: 800 },
   addrValue: {
     marginTop: 2,
     fontSize: 12,
@@ -221,6 +253,8 @@ export const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
   },
+
+  addrHint: { fontSize: 11, opacity: 0.7, marginTop: 4, fontWeight: 700 },
 
   modalBody: {
     display: "grid",
@@ -302,6 +336,40 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   paneTitle: { fontSize: 16, fontWeight: 950 },
+
+
+  detailsMetricsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: 12,
+    marginTop: 12,
+  },
+
+  perfGraph: {
+    marginTop: 8,
+    height: 110,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.08)",
+    background: "rgba(255,255,255,.03)",
+    display: "grid",
+    gridTemplateColumns: "repeat(24, 1fr)",
+    alignItems: "end",
+    gap: 4,
+    padding: 8,
+  },
+
+  perfBarWrap: {
+    height: "100%",
+    display: "flex",
+    alignItems: "end",
+  },
+
+  perfBar: {
+    width: "100%",
+    borderRadius: 4,
+    background: "linear-gradient(180deg, rgba(59,130,246,.95), rgba(168,85,247,.9))",
+    minHeight: 4,
+  },
 
   kvGrid: {
     display: "grid",

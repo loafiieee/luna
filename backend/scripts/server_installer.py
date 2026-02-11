@@ -86,6 +86,32 @@ def _find_java_executable(jdk_root: Path) -> Path:
 def _run_checked(args: list[str], *, cwd: str | None = None) -> None:
     subprocess.run(args, cwd=cwd, check=True)
 
+
+def _default_server_icon_source() -> Path | None:
+    root = Path(__file__).resolve().parents[2]
+    candidates = [
+        root / "backend" / "assets" / "default-server-icon.png",
+        root / "app" / "luna" / "src-tauri" / "icons" / "icon.png",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _ensure_default_server_icon(server_dir: Path) -> None:
+    target = server_dir / "server-icon.png"
+    if target.exists():
+        return
+
+    src = _default_server_icon_source()
+    if src is None:
+        print("Warning: No default server icon source found; skipping server-icon.png")
+        return
+
+    shutil.copyfile(src, target)
+
+
 def get_forge_installer_url(mc_version: str) -> str:
     """Get the latest Forge installer URL for a given Minecraft version."""
     try:
@@ -295,6 +321,8 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
 
         elif edition == "both":
             geyser_download(platform, version, name, RAM, EULA)
+
+        _ensure_default_server_icon(server_folder)
 
         print("Installation completed successfully.")
 
@@ -601,6 +629,51 @@ def java_download(platform: str, version: str, name: str, RAM: int, EULA: bool, 
                     f.write(line)
         print(f"Set server port to {port} in server.properties")
 
+
+
+def _jar_looks_like_plugin(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            names = set(zf.namelist())
+        return "plugin.yml" in names or "paper-plugin.yml" in names
+    except Exception:
+        return False
+
+
+def _pick_geyser_plugin_url(mc_version: str) -> str:
+    base = "https://api.modrinth.com/v2/project/geyser/version"
+    try:
+        # Prefer current game version and bukkit-style loader artifacts first.
+        versions = http_get_json(base)
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch Geyser versions from Modrinth: {e}")
+
+    if not isinstance(versions, list) or not versions:
+        raise RuntimeError("Could not fetch Geyser versions from Modrinth")
+
+    preferred_loaders = {"paper", "purpur", "spigot", "bukkit"}
+
+    def score(version_obj: dict) -> tuple[int, int]:
+        loaders = set(version_obj.get("loaders") or [])
+        game_versions = set(version_obj.get("game_versions") or [])
+        return (1 if mc_version in game_versions else 0, 1 if loaders.intersection(preferred_loaders) else 0)
+
+    for version_obj in sorted(versions, key=score, reverse=True):
+        files = version_obj.get("files")
+        if not isinstance(files, list):
+            continue
+        for file_obj in files:
+            if not isinstance(file_obj, dict):
+                continue
+            filename = str(file_obj.get("filename", "")).lower()
+            if not filename.endswith(".jar"):
+                continue
+            url = file_obj.get("url")
+            if isinstance(url, str) and url:
+                return url
+
+    raise RuntimeError("No downloadable Geyser plugin file found")
+
 def bedrock_download(name: str, RAM: int, EULA: bool):
     print("Downloading Bedrock server...")
     if os.name != 'nt':
@@ -640,26 +713,13 @@ def geyser_download(platform: str, version: str, name: str, RAM: int, EULA: bool
     plugins_dir = server_dir / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
 
-    # Download latest stable Geyser plugin from Modrinth.
-    geyser_version_url = "https://api.modrinth.com/v2/project/geyser/"
-    versions = requests.get(f"{geyser_version_url}version", timeout=30)
-    versions.raise_for_status()
-    version_data = versions.json()
-    if not isinstance(version_data, list) or not version_data:
-        raise RuntimeError("Could not fetch Geyser versions from Modrinth")
-
-    plugin_file = None
-    for file_obj in version_data[0].get("files", []):
-        filename = str(file_obj.get("filename", ""))
-        if filename.endswith(".jar"):
-            plugin_file = file_obj
-            break
-
-    if not plugin_file:
-        raise RuntimeError("No downloadable Geyser plugin file found")
-
     geyser_path = plugins_dir / "Geyser-Spigot.jar"
-    download_file(plugin_file["url"], geyser_path)
+    geyser_url = _pick_geyser_plugin_url(version)
+    download_file(geyser_url, geyser_path)
+    if not _jar_looks_like_plugin(geyser_path):
+        raise RuntimeError(
+            "Downloaded Geyser artifact is not a Bukkit/Paper plugin jar (plugin.yml missing)."
+        )
 
     # Configure Bedrock port so both Java + Bedrock can run from same managed server.
     bedrock_port = int(server_record["port"])

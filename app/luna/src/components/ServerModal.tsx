@@ -15,6 +15,7 @@ export function ServerModal({
   onStop,
   onRequestClose,
   onRename,
+  onDelete,
   addLog,
 }: {
   server: ServerInfo;
@@ -27,6 +28,7 @@ export function ServerModal({
   onStop: () => void;
   onRequestClose: () => void;
   onRename: (name: string) => Promise<void>;
+  onDelete: () => Promise<void>;
   addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
 }) {
   const isOnline = !!server.running;
@@ -41,6 +43,7 @@ export function ServerModal({
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(server.name);
   const [renaming, setRenaming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const players: Array<{ name: string; head_url?: string }> = useMemo(() => {
     const rt = server.runtime ?? {};
@@ -87,6 +90,17 @@ export function ServerModal({
       setEditingName(false);
     } finally {
       setRenaming(false);
+    }
+  }
+
+  async function deleteCurrentServer() {
+    const confirmed = window.confirm(`Delete "${server.name}"? This removes the server files.`);
+    if (!confirmed) return;
+    try {
+      setDeleting(true);
+      await onDelete();
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -196,6 +210,18 @@ export function ServerModal({
           <NavItem label="Tunnels" active={tab === "tunnels"} onClick={() => setTab("tunnels")} />
           <NavItem label="Settings" active={tab === "settings"} onClick={() => setTab("settings")} />
           <NavItem label="Server Folder" active={tab === "server_folder"} onClick={() => setTab("server_folder")} />
+
+          <div style={styles.leftNavFooter}>
+            <button
+              type="button"
+              style={styles.deleteServerBtn}
+              onClick={deleteCurrentServer}
+              disabled={deleting}
+              title="Delete server"
+            >
+              {deleting ? "Deleting…" : "Delete Server"}
+            </button>
+          </div>
         </div>
 
         <div style={styles.centerPane}>

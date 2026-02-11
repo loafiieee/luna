@@ -271,6 +271,23 @@ export const styles: Record<string, React.CSSProperties> = {
     gap: 10,
   },
 
+  leftNavFooter: {
+    marginTop: "auto",
+    paddingTop: 8,
+  },
+
+  deleteServerBtn: {
+    width: "100%",
+    textAlign: "left",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(239,68,68,.4)",
+    background: "rgba(239,68,68,.16)",
+    color: "rgba(255,220,220,.95)",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
   centerPane: { padding: 16 },
 
   rightPane: {

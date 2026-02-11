@@ -86,6 +86,32 @@ def _find_java_executable(jdk_root: Path) -> Path:
 def _run_checked(args: list[str], *, cwd: str | None = None) -> None:
     subprocess.run(args, cwd=cwd, check=True)
 
+
+def _default_server_icon_source() -> Path | None:
+    root = Path(__file__).resolve().parents[2]
+    candidates = [
+        root / "backend" / "assets" / "default-server-icon.png",
+        root / "app" / "luna" / "src-tauri" / "icons" / "icon.png",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _ensure_default_server_icon(server_dir: Path) -> None:
+    target = server_dir / "server-icon.png"
+    if target.exists():
+        return
+
+    src = _default_server_icon_source()
+    if src is None:
+        print("Warning: No default server icon source found; skipping server-icon.png")
+        return
+
+    shutil.copyfile(src, target)
+
+
 def get_forge_installer_url(mc_version: str) -> str:
     """Get the latest Forge installer URL for a given Minecraft version."""
     try:
@@ -295,6 +321,8 @@ def install_server(edition: str, platform: str, version: str, name: str, RAM: in
 
         elif edition == "both":
             geyser_download(platform, version, name, RAM, EULA)
+
+        _ensure_default_server_icon(server_folder)
 
         print("Installation completed successfully.")
 

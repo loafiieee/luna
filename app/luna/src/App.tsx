@@ -112,6 +112,23 @@ export default function App() {
       throw e;
     }
   }
+
+
+  async function deleteServer(server: ServerInfo) {
+    setErr(null);
+    addLog("warn", `Delete requested for "${server.name}".`);
+    try {
+      await cli("delete_server", server.platform, server.version, server.name);
+      addLog("ok", `Deleted server "${server.name}".`);
+      setSelected(null);
+      await refresh();
+    } catch (e: any) {
+      const msg = String(e);
+      setErr(msg);
+      addLog("err", `Delete failed: ${msg}`);
+      throw e;
+    }
+  }
   const selectedServer = useMemo(() => {
     if (!selected) return null;
     return sortedServers.find((s) => s.server_id === selected.server_id) ?? selected;
@@ -196,6 +213,7 @@ export default function App() {
             onStop={() => stopServer(selectedServer)}
             onRequestClose={() => setSelected(null)}
             onRename={(name) => renameServer(selectedServer, name)}
+            onDelete={() => deleteServer(selectedServer)}
             addLog={addLog}
           />
         </Overlay>

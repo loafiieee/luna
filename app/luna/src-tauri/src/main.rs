@@ -129,6 +129,35 @@ fn parse_cli_json_output(stdout: &str) -> Result<Value, String> {
   Ok(parsed.pop().expect("parsed is non-empty"))
 }
 
+fn extract_cli_error_message(stdout: &str, stderr: &str) -> String {
+  for line in stdout.lines().rev() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+      if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+        if !msg.trim().is_empty() {
+          return msg.to_string();
+        }
+      }
+    }
+  }
+
+  let err = stderr.trim();
+  if !err.is_empty() {
+    return err.to_string();
+  }
+
+  let out = stdout.trim();
+  if !out.is_empty() {
+    return out.to_string();
+  }
+
+  "CLI command failed without output".to_string()
+}
+
 #[tauri::command]
 fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
   let cli = find_cli_exe()?;
@@ -145,8 +174,10 @@ fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
     .map_err(|e| e.to_string())?;
 
   if !output.status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    return Err(format!("cli failed: {}", stderr));
+    let message = extract_cli_error_message(&stdout, &stderr);
+    return Err(format!("cli failed: {message}"));
   }
 
   let stdout = String::from_utf8_lossy(&output.stdout).to_string();

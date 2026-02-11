@@ -46,9 +46,10 @@ export default function App() {
   function maxPlayersFor(server: ServerInfo): string {
     const rt: any = server.runtime ?? {};
     const candidate =
-      rt.max_players ??
-      rt.players_max ??
       rt.maxPlayers ??
+      rt.max_players ??
+      rt.maxplayers ??
+      rt.players_max ??
       rt.player_limit ??
       (server as any).max_players;
     if (typeof candidate === "number" && candidate > 0) return String(candidate);

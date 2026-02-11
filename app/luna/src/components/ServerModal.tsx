@@ -247,7 +247,7 @@ export function ServerModal({
         <div style={styles.rightPane}>
           <div style={styles.playersHeader}>
             <div style={{ fontWeight: 900 }}>Online Players</div>
-            <div style={{ opacity: 0.7 }}>{(isOnline && typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}</div>
+            <div style={{ opacity: 0.7 }}>{(typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}</div>
           </div>
 
           <input
@@ -348,14 +348,14 @@ function ConsolePane({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const ptyIdRef = useRef<string | null>(null);
   const pollerRef = useRef<number | null>(null);
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const offsetRef = useRef<number>(0);
   const [command, setCommand] = useState("");
   const [sending, setSending] = useState(false);
   const [pollErr, setPollErr] = useState<string | null>(null);
 
   useEffect(() => {
+    offsetRef.current = 0;
     setPollErr(null);
   }, [server.server_id]);
 
@@ -368,6 +368,7 @@ function ConsolePane({
         background: "#020617",
       },
       scrollback: 5000,
+      disableStdin: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -379,35 +380,17 @@ function ConsolePane({
       fit.fit();
     }
 
-    const start = async () => {
-      try {
-        const started = await invoke<{ pty_id: string }>("pty_start", {
-          serverId: server.server_id,
-          cols: term.cols,
-          rows: term.rows,
-        });
-        ptyIdRef.current = started.pty_id;
-        setPollErr(null);
-      } catch (e: any) {
-        setPollErr(String(e));
-      }
-    };
-
     const poll = async () => {
-      const ptyId = ptyIdRef.current;
-      if (!ptyId) return;
       try {
-        const res = await invoke<{ chunks: string[]; exited: boolean }>("pty_poll", { ptyId });
-        if (res.chunks.length > 0) {
-          for (const chunk of res.chunks) {
-            term.write(chunk);
-          }
-        }
-        if (res.exited) {
-          term.writeln("\r\n[session exited]");
-          if (pollerRef.current) {
-            window.clearInterval(pollerRef.current);
-            pollerRef.current = null;
+        const res = await invoke<{ lines: string[]; offset: number }>("read_server_console", {
+          serverId: server.server_id,
+          offset: offsetRef.current,
+          maxLines: 200,
+        });
+        offsetRef.current = res.offset;
+        if (res.lines.length > 0) {
+          for (const line of res.lines) {
+            term.writeln(line);
           }
         }
         setPollErr(null);
@@ -416,48 +399,27 @@ function ConsolePane({
       }
     };
 
-    start();
-    pollerRef.current = window.setInterval(poll, 250);
+    poll();
+    pollerRef.current = window.setInterval(poll, 300);
 
+    let observer: ResizeObserver | null = null;
     if (containerRef.current && "ResizeObserver" in window) {
-      const observer = new ResizeObserver(() => {
+      observer = new ResizeObserver(() => {
         try {
           fit.fit();
-          const ptyId = ptyIdRef.current;
-          if (ptyId) {
-            invoke("pty_resize", { ptyId, cols: term.cols, rows: term.rows });
-          }
         } catch {
           // ignore
         }
       });
       observer.observe(containerRef.current);
-      resizeObserverRef.current = observer;
     }
-
-    term.onData((data: string) => {
-      const ptyId = ptyIdRef.current;
-      if (ptyId) {
-        invoke("pty_write", { ptyId, data }).catch(() => {
-          // ignore write errors in key stream
-        });
-      }
-    });
 
     return () => {
       if (pollerRef.current) {
         window.clearInterval(pollerRef.current);
         pollerRef.current = null;
       }
-      resizeObserverRef.current?.disconnect();
-      resizeObserverRef.current = null;
-      const ptyId = ptyIdRef.current;
-      if (ptyId) {
-        invoke("pty_stop", { ptyId }).catch(() => {
-          // ignore
-        });
-      }
-      ptyIdRef.current = null;
+      observer?.disconnect();
       term.dispose();
       terminalRef.current = null;
       fitRef.current = null;
@@ -469,11 +431,7 @@ function ConsolePane({
     const out = command.trim();
     setSending(true);
     try {
-      const ptyId = ptyIdRef.current;
-      if (!ptyId) {
-        throw new Error("PTY session is not ready yet");
-      }
-      await invoke("pty_write", { ptyId, data: `${out}\n` });
+      await invoke("send_server_console_command", { serverId: server.server_id, command: out });
       addLog("ok", `Console command sent to "${server.name}": ${out}`);
       setCommand("");
     } catch (e: any) {

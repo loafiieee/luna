@@ -53,5 +53,13 @@ export function useServers(addLog: (lvl: any, msg: string) => void) {
     refresh();
   }, [refresh]);
 
+  // Keep runtime state (running/offline/player counts) fresh.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      refresh();
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [refresh]);
+
   return { servers, sortedServers, loading, refresh, setServers };
 }

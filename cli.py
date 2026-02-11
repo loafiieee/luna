@@ -341,11 +341,11 @@ def main(argv: List[str]) -> int:
         if len(argv) < 3:
             error("Usage: cli.py get_versions <software>")
             return 1
-        print(list_versions(argv[2]))
+        result("get_versions", list_versions(argv[2]))
         return 0
 
     if cmd == "get_platforms":
-        print(list_platforms())
+        result("get_platforms", list_platforms())
         return 0
 
     if cmd == "install_server":
@@ -418,7 +418,7 @@ def main(argv: List[str]) -> int:
         runtime = _safe_read_json(runtime_state_path(str(server_id)))
         server_pid = int(runtime.get("server_pid") or 0)
         if server_pid and _process_exists(server_pid):
-            info({"server_id": server_id, "status": "already_running", "server_pid": server_pid})
+            result("start_server", {"server_id": server_id, "status": "already_running", "server_pid": server_pid})
             return 0
 
         edition = str(server.get("edition") or "java")
@@ -435,7 +435,7 @@ def main(argv: List[str]) -> int:
             child_args = [sys.executable, "run_server", edition, platform, version, name]
 
         manager_pid = _spawn_detached(child_args)
-        info({
+        result("start_server", {
             "server_id": server_id,
             "status": "starting",
             "manager_pid": manager_pid,
@@ -455,7 +455,7 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
-        info({"server_id": server_id, "stopped": bool(stopped)})
+        result("stop_server", {"server_id": server_id, "stopped": bool(stopped)})
         return 0
 
     if cmd == "delete_server":
@@ -631,12 +631,12 @@ def main(argv: List[str]) -> int:
         except Exception as e:
             error(str(e))
             return 1
-        info(updated)
+        result("rename_server", updated)
         return 0
 
     if cmd == "list_servers":
         servers = read_servers_file()
-        info(_enrich_servers_for_ui(servers))
+        result("list_servers", {"servers": _enrich_servers_for_ui(servers)})
         return 0
 
     if cmd == "help":

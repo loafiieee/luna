@@ -1,5 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
+import { Terminal } from "xterm";
+import { FitAddon } from "xterm-addon-fit";
+import "xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
@@ -230,7 +234,7 @@ export function ServerModal({
 
         <div style={styles.centerPane}>
           {tab === "details" && <DetailsPane server={server} />}
-          {tab === "console" && <PlaceholderPane title="Console" desc="Coming next (PTY + xterm)." />}
+          {tab === "console" && <ConsolePane server={server} addLog={addLog} />}
           {tab === "content" && (
             <PlaceholderPane title="Content" desc="Plugins / Mods / Datapacks UI scaffold (Modrinth later)." />
           )}
@@ -330,6 +334,183 @@ function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
         )}
       </div>
       <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis" }}>{name}</div>
+    </div>
+  );
+}
+
+function ConsolePane({
+  server,
+  addLog,
+}: {
+  server: ServerInfo;
+  addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const ptyIdRef = useRef<string | null>(null);
+  const pollerRef = useRef<number | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const [command, setCommand] = useState("");
+  const [sending, setSending] = useState(false);
+  const [pollErr, setPollErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPollErr(null);
+  }, [server.server_id]);
+
+  useEffect(() => {
+    const term = new Terminal({
+      convertEol: true,
+      fontSize: 12,
+      cursorBlink: true,
+      theme: {
+        background: "#020617",
+      },
+      scrollback: 5000,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    terminalRef.current = term;
+    fitRef.current = fit;
+
+    if (containerRef.current) {
+      term.open(containerRef.current);
+      fit.fit();
+    }
+
+    const start = async () => {
+      try {
+        const started = await invoke<{ pty_id: string }>("pty_start", {
+          serverId: server.server_id,
+          cols: term.cols,
+          rows: term.rows,
+        });
+        ptyIdRef.current = started.pty_id;
+        setPollErr(null);
+      } catch (e: any) {
+        setPollErr(String(e));
+      }
+    };
+
+    const poll = async () => {
+      const ptyId = ptyIdRef.current;
+      if (!ptyId) return;
+      try {
+        const res = await invoke<{ chunks: string[]; exited: boolean }>("pty_poll", { ptyId });
+        if (res.chunks.length > 0) {
+          for (const chunk of res.chunks) {
+            term.write(chunk);
+          }
+        }
+        if (res.exited) {
+          term.writeln("\r\n[session exited]");
+          if (pollerRef.current) {
+            window.clearInterval(pollerRef.current);
+            pollerRef.current = null;
+          }
+        }
+        setPollErr(null);
+      } catch (e: any) {
+        setPollErr(String(e));
+      }
+    };
+
+    start();
+    pollerRef.current = window.setInterval(poll, 250);
+
+    if (containerRef.current && "ResizeObserver" in window) {
+      const observer = new ResizeObserver(() => {
+        try {
+          fit.fit();
+          const ptyId = ptyIdRef.current;
+          if (ptyId) {
+            invoke("pty_resize", { ptyId, cols: term.cols, rows: term.rows });
+          }
+        } catch {
+          // ignore
+        }
+      });
+      observer.observe(containerRef.current);
+      resizeObserverRef.current = observer;
+    }
+
+    term.onData((data: string) => {
+      const ptyId = ptyIdRef.current;
+      if (ptyId) {
+        invoke("pty_write", { ptyId, data }).catch(() => {
+          // ignore write errors in key stream
+        });
+      }
+    });
+
+    return () => {
+      if (pollerRef.current) {
+        window.clearInterval(pollerRef.current);
+        pollerRef.current = null;
+      }
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
+      const ptyId = ptyIdRef.current;
+      if (ptyId) {
+        invoke("pty_stop", { ptyId }).catch(() => {
+          // ignore
+        });
+      }
+      ptyIdRef.current = null;
+      term.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
+    };
+  }, [server.server_id]);
+
+  async function sendCommand() {
+    if (!command.trim()) return;
+    const out = command.trim();
+    setSending(true);
+    try {
+      const ptyId = ptyIdRef.current;
+      if (!ptyId) {
+        throw new Error("PTY session is not ready yet");
+      }
+      await invoke("pty_write", { ptyId, data: `${out}\n` });
+      addLog("ok", `Console command sent to "${server.name}": ${out}`);
+      setCommand("");
+    } catch (e: any) {
+      const msg = String(e);
+      addLog("err", `Console command failed for "${server.name}": ${msg}`);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Console</div>
+      <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
+
+      <div style={styles.consoleView} ref={containerRef} />
+
+      <div style={styles.consoleInputRow}>
+        <input
+          style={styles.consoleInput}
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder={server.running ? "say hello" : "Start server to use console commands"}
+          disabled={!server.running || sending}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              sendCommand();
+            }
+          }}
+        />
+        <button type="button" style={btn("primary")} onClick={sendCommand} disabled={!server.running || sending || !command.trim()}>
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </div>
+
+      {pollErr && <div style={styles.consoleError}>Console read error: {pollErr}</div>}
     </div>
   );
 }

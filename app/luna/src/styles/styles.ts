@@ -381,6 +381,64 @@ export const styles: Record<string, React.CSSProperties> = {
 
   paneTitle: { fontSize: 16, fontWeight: 950 },
 
+  consoleHint: {
+    marginTop: 8,
+    opacity: 0.7,
+    fontSize: 12,
+    fontWeight: 700,
+  },
+
+  consoleView: {
+    marginTop: 10,
+    height: 370,
+    overflow: "auto",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(2,6,23,.92)",
+    padding: 10,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 12,
+    lineHeight: 1.45,
+  },
+
+  consoleLine: {
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    color: "rgba(229,231,235,.95)",
+    marginBottom: 4,
+  },
+
+  consoleEmpty: {
+    opacity: 0.65,
+    fontWeight: 700,
+  },
+
+  consoleInputRow: {
+    marginTop: 10,
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  consoleInput: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.04)",
+    color: "rgba(255,255,255,.95)",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+
+  consoleError: {
+    marginTop: 8,
+    fontSize: 12,
+    color: "rgba(252,165,165,.95)",
+    fontWeight: 800,
+  },
+
 
   detailsMetricsGrid: {
     display: "grid",

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
@@ -14,6 +14,7 @@ export function ServerModal({
   onStart,
   onStop,
   onRequestClose,
+  onRename,
   addLog,
 }: {
   server: ServerInfo;
@@ -25,22 +26,25 @@ export function ServerModal({
   onStart: () => void;
   onStop: () => void;
   onRequestClose: () => void;
+  onRename: (name: string) => Promise<void>;
   addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
 }) {
   const isOnline = !!server.running;
-  const icon = server.icon_path ? convertFileSrc(server.icon_path) : null;
+  const derivedIconPath =
+    server.icon_path ||
+    (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
+    (server.server_dir ? `${server.server_dir}/icon.png` : null);
+  const icon = derivedIconPath ? convertFileSrc(derivedIconPath) : null;
 
   const [playerSearch, setPlayerSearch] = useState("");
+  const [copiedAddress, setCopiedAddress] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(server.name);
+  const [renaming, setRenaming] = useState(false);
 
   const players: Array<{ name: string; head_url?: string }> = useMemo(() => {
     const rt = server.runtime ?? {};
-    const list =
-      rt.players_list ??
-      rt.players ??
-      rt.online_players_list ??
-      rt.onlinePlayers ??
-      rt.online_players ??
-      [];
+    const list = rt.players_list ?? rt.players ?? rt.online_players_list ?? rt.onlinePlayers ?? rt.online_players ?? [];
     if (!Array.isArray(list)) return [];
     return list
       .map((p: any) => {
@@ -57,6 +61,49 @@ export function ServerModal({
     if (!q) return players;
     return players.filter((p) => p.name.toLowerCase().includes(q));
   }, [players, playerSearch]);
+
+  useEffect(() => {
+    setNameDraft(server.name);
+  }, [server.name]);
+
+  useEffect(() => {
+    if (!copiedAddress) return;
+    const t = window.setTimeout(() => setCopiedAddress(false), 1600);
+    return () => window.clearTimeout(t);
+  }, [copiedAddress]);
+
+
+
+  async function submitRename() {
+    const next = nameDraft.trim();
+    if (!next || next === server.name) {
+      setEditingName(false);
+      setNameDraft(server.name);
+      return;
+    }
+    try {
+      setRenaming(true);
+      await onRename(next);
+      setEditingName(false);
+    } finally {
+      setRenaming(false);
+    }
+  }
+
+  async function copyAddress() {
+    if (!address) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(address);
+      } else {
+        throw new Error("clipboard unavailable");
+      }
+      setCopiedAddress(true);
+      addLog("ok", `Copied public address for \"${server.name}\".`);
+    } catch {
+      addLog("warn", "Could not copy to clipboard automatically.");
+    }
+  }
 
   return (
     <div style={styles.modal}>
@@ -76,17 +123,42 @@ export function ServerModal({
 
           <div style={{ minWidth: 0 }}>
             <div style={styles.modalTitleRow}>
-              <div style={styles.modalName}>{server.name}</div>
+              {editingName ? (
+                <input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitRename();
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setEditingName(false);
+                      setNameDraft(server.name);
+                    }
+                  }}
+                  onBlur={submitRename}
+                  disabled={renaming}
+                  style={styles.modalNameInput}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setEditingName(true)}
+                  title="Click to rename"
+                  style={styles.modalNameButton}
+                >
+                  {server.name}
+                </button>
+              )}
               <div style={{ marginLeft: 10 }}>{isOnline ? pill("Online", "ok") : pill("Offline", "muted")}</div>
-            </div>
-            <div style={styles.modalSubtitle}>
-              {server.edition} · {server.platform} · {server.version}
             </div>
           </div>
         </div>
 
         <div style={styles.modalTopRight}>
-          <div style={styles.topSeparator} />
           <button
             style={btn(isOnline ? "danger" : "primary")}
             onClick={() => {
@@ -97,14 +169,17 @@ export function ServerModal({
             {isOnline ? "Stop" : "Start"}
           </button>
 
-          <div style={styles.topSeparator} />
-
-          <div style={styles.addrWrap}>
+          <button
+            type="button"
+            style={{ ...styles.addrButton, ...(copiedAddress ? styles.addrButtonCopied : {}) }}
+            onClick={copyAddress}
+            title={address ? "Click to copy" : "No public address yet"}
+            disabled={!address}
+          >
             <div style={styles.addrLabel}>Public Address</div>
-            <div style={styles.addrValue} title={address}>
-              {address || "(none)"}
-            </div>
-          </div>
+            <div style={styles.addrValue} title={address}>{address || "(pending tunnel)"}</div>
+            <div style={styles.addrHint}>{copiedAddress ? "Copied" : "Click to copy"}</div>
+          </button>
 
           <button style={btn("ghost")} onClick={onRequestClose} title="Close">
             ✕
@@ -124,7 +199,7 @@ export function ServerModal({
         </div>
 
         <div style={styles.centerPane}>
-          {tab === "details" && <DetailsPane server={server} address={address} maxPlayers={maxPlayers} />}
+          {tab === "details" && <DetailsPane server={server} />}
           {tab === "console" && <PlaceholderPane title="Console" desc="Coming next (PTY + xterm)." />}
           {tab === "content" && (
             <PlaceholderPane title="Content" desc="Plugins / Mods / Datapacks UI scaffold (Modrinth later)." />
@@ -138,9 +213,7 @@ export function ServerModal({
         <div style={styles.rightPane}>
           <div style={styles.playersHeader}>
             <div style={{ fontWeight: 900 }}>Online Players</div>
-            <div style={{ opacity: 0.7 }}>
-              {(isOnline && typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}
-            </div>
+            <div style={{ opacity: 0.7 }}>{(isOnline && typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}</div>
           </div>
 
           <input
@@ -202,62 +275,44 @@ function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
   );
 }
 
-function DetailsPane({ server, address, maxPlayers }: { server: ServerInfo; address: string; maxPlayers: string }) {
+function DetailsPane({ server }: { server: ServerInfo }) {
   const rt: any = server.runtime ?? {};
-  const t: any = rt.tunnel ?? {};
+  const isOnline = !!server.running;
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const pid: number | null =
-    (typeof server.pid === "number" ? server.pid : null) ??
-    (typeof rt.server_pid === "number" ? rt.server_pid : null);
+  useEffect(() => {
+    if (!isOnline) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isOnline]);
 
-  const javaPort = typeof rt.java_port === "number" ? rt.java_port : 0;
-  const bedrockPort = typeof rt.bedrock_port === "number" ? rt.bedrock_port : 0;
+  const cpuPercent = pickNumber(rt, ["cpu_percent", "cpu_usage", "cpu", "process_cpu_percent"]);
+  const ramMb = pickNumber(rt, ["ram_mb", "ram_usage_mb", "memory_mb", "rss_mb", "memory"]);
 
-  const tcp = typeof t.public_tcp_address === "string" ? t.public_tcp_address : null;
-  const udp = typeof t.public_udp_address === "string" ? t.public_udp_address : null;
-  const voice = typeof t.public_voice_address === "string" ? t.public_voice_address : null;
-
-  // started_at is an epoch seconds float in your runtime
   const startedAtSec = typeof rt.started_at === "number" ? rt.started_at : null;
-  const uptime = startedAtSec ? Math.max(0, Math.floor(Date.now() / 1000 - startedAtSec)) : null;
+  const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
 
-  function fmtUptime(sec: number | null) {
-    if (sec == null) return "—";
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    return `${h}h ${m}m`;
-  }
-
-  const state = typeof rt.state === "string" ? rt.state : server.running ? "running" : "stopped";
+  const perfSamples = buildPerfSamples(rt);
 
   return (
     <div>
       <div style={styles.paneTitle}>Details</div>
 
-      <div style={{ marginTop: 12 }}>
-        <div style={{ opacity: 0.75, fontWeight: 800, fontSize: 12 }}>Live Stats</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, marginTop: 10 }}>
-          <KV k="State" v={state} />
-          <KV k="PID" v={pid != null ? String(pid) : "—"} mono />
-          <KV k="Uptime" v={fmtUptime(uptime)} />
-          <KV k="Java Port" v={javaPort ? String(javaPort) : "—"} />
-          <KV k="Bedrock Port" v={bedrockPort ? String(bedrockPort) : "—"} />
-          <KV k="Players" v={`${(server.running && typeof rt.players_online === "number" ? rt.players_online : 0)}/${maxPlayers}`} />
-          <KV k="Public TCP" v={tcp ?? "—"} mono />
-          <KV k="Public UDP" v={udp ?? "—"} mono />
-          <KV k="Voice" v={voice ?? "—"} mono />
-        </div>
+      <div style={styles.detailsMetricsGrid}>
+        <KV k="CPU usage" v={cpuPercent != null ? `${cpuPercent.toFixed(1)}%` : "—"} />
+        <KV k="RAM usage" v={ramMb != null ? `${ramMb.toFixed(0)} MB` : "—"} />
+        <KV k="Server uptime" v={formatUptime(uptimeSeconds)} mono />
       </div>
 
-      <div style={styles.kvGrid}>
-        <KV k="Name" v={server.name} />
-        <KV k="Edition" v={server.edition} />
-        <KV k="Platform" v={server.platform} />
-        <KV k="Version" v={server.version} />
-        <KV k="Folder" v={server.folder} mono />
-        <KV k="Tunneling" v={server.tunneling ? "Enabled" : "Disabled"} />
-        <KV k="Sticky address" v={server.sticky_address ? "Yes" : "No"} />
-        <KV k="Address (primary)" v={address || "—"} mono />
+      <div style={{ marginTop: 14 }}>
+        <div style={styles.smallLabel}>Performance graph</div>
+        <div style={styles.perfGraph}>
+          {perfSamples.map((sample, idx) => (
+            <div key={idx} style={styles.perfBarWrap}>
+              <div style={{ ...styles.perfBar, height: `${Math.max(4, Math.min(100, sample))}%` }} />
+            </div>
+          ))}
+        </div>
       </div>
 
       <div style={{ marginTop: 14 }}>
@@ -266,6 +321,36 @@ function DetailsPane({ server, address, maxPlayers }: { server: ServerInfo; addr
       </div>
     </div>
   );
+}
+
+function pickNumber(source: any, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function buildPerfSamples(rt: any): number[] {
+  const candidates = [rt?.cpu_history, rt?.metrics?.cpu, rt?.performance?.cpu, rt?.history?.cpu];
+  for (const c of candidates) {
+    if (!Array.isArray(c)) continue;
+    const nums = c.filter((n: any) => typeof n === "number" && Number.isFinite(n)).slice(-24);
+    if (nums.length > 0) return nums.map((n: number) => Math.max(0, Math.min(100, n)));
+  }
+  return new Array(24).fill(0);
+}
+
+function formatUptime(sec: number | null) {
+  if (sec == null) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function TunnelsPane({ server }: { server: ServerInfo }) {
@@ -279,8 +364,7 @@ function TunnelsPane({ server }: { server: ServerInfo }) {
   const subdomain = typeof t.subdomain === "string" ? t.subdomain : null;
   const suffix = typeof t.domain_suffix === "string" ? t.domain_suffix : null;
 
-  const primary =
-    (server.edition === "bedrock" ? udp ?? tcp : tcp ?? udp) ?? "(none)";
+  const primary = (server.edition === "bedrock" ? udp ?? tcp : tcp ?? udp) ?? "(none)";
 
   return (
     <div>

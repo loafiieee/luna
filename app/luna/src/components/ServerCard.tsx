@@ -17,7 +17,11 @@ export function ServerCard({
   onlinePlayers: number | null;
 }) {
   const isOnline = !!server.running;
-  const icon = server.icon_path ? convertFileSrc(server.icon_path) : null;
+  const derivedIconPath =
+    server.icon_path ||
+    (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
+    (server.server_dir ? `${server.server_dir}/icon.png` : null);
+  const icon = derivedIconPath ? convertFileSrc(derivedIconPath) : null;
 
   return (
     <div style={styles.card} onClick={onOpen}>

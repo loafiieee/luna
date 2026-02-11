@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import os
+import subprocess
 import sys
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -9,7 +11,7 @@ from backend.utils.get_reseved_ports import *
 from backend.scripts.server_installer import *
 from backend.scripts.run_server import *
 from backend.scripts.delete_server import *
-from backend.utils.paths import servers_dir, runtime_state_path
+from backend.utils.paths import configure_data_root, servers_dir, runtime_state_path, servers_state_path
 from backend.utils.state import STATE
 
 # Modrinth support
@@ -247,12 +249,77 @@ def _rename_server(server_id: str, new_name: str) -> dict:
         raise ValueError(f"Server {server_id} not found")
     return found
 
+
+def _find_server_by_id(server_id: str) -> dict:
+    sid = str(server_id)
+    for server in STATE.read():
+        if str(server.get("server_id") or "") == sid:
+            return dict(server)
+    raise ValueError(f"Server {server_id} not found")
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _spawn_detached(args: list[str]) -> int:
+    kwargs: dict = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
+        "close_fds": True,
+        "env": os.environ.copy(),
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(args, **kwargs)
+    return int(proc.pid)
+
 def main(argv: List[str]) -> int:
     # Global flags
     if "--json" in argv:
         argv = [a for a in argv if a != "--json"]
         set_json_mode(True)
         install_output_capture()
+
+    data_dir: Optional[str] = None
+    portable = False
+    cleaned: list[str] = [argv[0]]
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token == "--data-dir":
+            if i + 1 >= len(argv):
+                error("Usage: --data-dir <path>")
+                return 1
+            data_dir = argv[i + 1]
+            i += 2
+            continue
+        if token.startswith("--data-dir="):
+            data_dir = token.split("=", 1)[1]
+            i += 1
+            continue
+        if token == "--portable":
+            portable = True
+            i += 1
+            continue
+
+        cleaned.append(token)
+        i += 1
+    argv = cleaned
+
+    data_root = configure_data_root(data_dir=data_dir, portable=portable)
+    STATE.set_path(servers_state_path())
+    os.chdir(data_root)
             
     # Keep servers.json in sync with what's actually on disk
     try:
@@ -334,6 +401,61 @@ def main(argv: List[str]) -> int:
         event("run_starting", edition=edition, platform=platform, version=version, name=name)
         run_server(edition, platform, version, name)
         event("run_finished", edition=edition, platform=platform, version=version, name=name)
+        return 0
+
+    if cmd == "start_server":
+        if len(argv) < 3:
+            error("Usage: cli.py start_server <server_id>")
+            return 1
+
+        server_id = argv[2]
+        try:
+            server = _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        runtime = _safe_read_json(runtime_state_path(str(server_id)))
+        server_pid = int(runtime.get("server_pid") or 0)
+        if server_pid and _process_exists(server_pid):
+            info({"server_id": server_id, "status": "already_running", "server_pid": server_pid})
+            return 0
+
+        edition = str(server.get("edition") or "java")
+        platform = str(server.get("platform") or "")
+        version = str(server.get("version") or "")
+        name = str(server.get("name") or "")
+        if not platform or not version or not name:
+            error(f"Server {server_id} is missing platform/version/name")
+            return 1
+
+        if Path(sys.argv[0]).suffix.lower() == ".py":
+            child_args = [sys.executable, str(Path(__file__).resolve()), "run_server", edition, platform, version, name]
+        else:
+            child_args = [sys.executable, "run_server", edition, platform, version, name]
+
+        manager_pid = _spawn_detached(child_args)
+        info({
+            "server_id": server_id,
+            "status": "starting",
+            "manager_pid": manager_pid,
+        })
+        return 0
+
+    if cmd == "stop_server":
+        if len(argv) < 3:
+            error("Usage: cli.py stop_server <server_id>")
+            return 1
+
+        server_id = argv[2]
+        timeout_s = 15.0
+        try:
+            stopped = stop_server(server_id=server_id, timeout_s=timeout_s)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        info({"server_id": server_id, "stopped": bool(stopped)})
         return 0
 
     if cmd == "delete_server":
@@ -519,7 +641,7 @@ def main(argv: List[str]) -> int:
 
     if cmd == "help":
         info(
-            "Available commands: get_versions, install_server, get_platforms, run_server, delete_server, get_reserved_ports, "
+            "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
             "modrinth_search, modrinth_project, modrinth_download, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")

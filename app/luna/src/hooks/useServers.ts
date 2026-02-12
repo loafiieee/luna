@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cli } from "../lib/cli";
 import type { ServerInfo } from "../lib/types";
 import { loadCachedServers, saveCachedServers } from "../lib/cache";
+import { isServerOnline } from "../lib/serverRuntime";
 
 export function useServers(addLog: (lvl: any, msg: string) => void) {
   const [servers, setServers] = useState<ServerInfo[]>(() => {
@@ -13,8 +14,8 @@ export function useServers(addLog: (lvl: any, msg: string) => void) {
 
   const sortedServers = useMemo(() => {
     return [...servers].sort((a, b) => {
-      const ar = a.running ? 0 : 1;
-      const br = b.running ? 0 : 1;
+      const ar = isServerOnline(a) ? 0 : 1;
+      const br = isServerOnline(b) ? 0 : 1;
       if (ar !== br) return ar - br;
       return a.name.localeCompare(b.name);
     });

@@ -455,6 +455,35 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
+        # Structural resilience: detached launcher flows can race with status updates.
+        # If backend stop returned false, verify directly from runtime/port before failing.
+        if not stopped:
+            rt = _safe_read_json(runtime_state_path(str(server_id)))
+            state = str(rt.get("state") or "").lower()
+            java_port = int(rt.get("java_port") or 0)
+            detached = bool(rt.get("detached_process"))
+            server_pid = int(rt.get("server_pid") or 0)
+
+            definitely_stopped = False
+            if server_pid > 0:
+                definitely_stopped = not _process_exists(server_pid)
+            elif detached and java_port > 0:
+                try:
+                    import socket
+
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.3)
+                    rc = sock.connect_ex(("127.0.0.1", java_port))
+                    sock.close()
+                    definitely_stopped = rc != 0
+                except Exception:
+                    definitely_stopped = state in {"stopped", "stopping", "offline", "down"}
+            else:
+                definitely_stopped = state in {"stopped", "stopping", "offline", "down"}
+
+            if definitely_stopped:
+                stopped = True
+
         result("stop_server", {"server_id": server_id, "stopped": bool(stopped)})
         return 0
 

@@ -159,29 +159,41 @@ fn extract_cli_error_message(stdout: &str, stderr: &str) -> String {
 }
 
 #[tauri::command]
-fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
-  let cli = find_cli_exe()?;
-  let data_dir = app_data_dir()?;
+async fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let cli = find_cli_exe()?;
+    let data_dir = app_data_dir()?;
 
-  std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
 
-  let output = Command::new(cli)
-    .arg("--json")
-    .arg("--data-dir")
-    .arg(data_dir)
-    .args(args)
-    .output()
-    .map_err(|e| e.to_string())?;
+    let output = Command::new(cli)
+      .arg("--json")
+      .arg("--data-dir")
+      .arg(data_dir)
+      .args(args)
+      .output()
+      .map_err(|e| e.to_string())?;
 
-  if !output.status.success() {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if output.status.success() {
+      return parse_cli_json_output(&stdout);
+    }
+
+    // Some CLI paths can emit a structured JSON result payload even when the
+    // process exits non-zero. Preserve that structured response for the UI
+    // instead of converting everything into a hard transport error.
+    if let Ok(parsed) = parse_cli_json_output(&stdout) {
+      if parsed.get("event").and_then(|e| e.as_str()) == Some("result") {
+        return Ok(parsed);
+      }
+    }
+
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let message = extract_cli_error_message(&stdout, &stderr);
-    return Err(format!("cli failed: {message}"));
-  }
-
-  let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-  parse_cli_json_output(&stdout)
+    Err(format!("cli failed: {message}"))
+  })
+  .await
+  .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

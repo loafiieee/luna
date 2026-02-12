@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
+import { isServerOnline } from "../lib/serverRuntime";
 
 export type ServerModalProps = {
   server: ServerInfo;
@@ -48,6 +49,7 @@ export function ServerModal({
     (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
     (server.server_dir ? `${server.server_dir}/icon.png` : null);
   const icon = derivedIconPath ? convertFileSrc(derivedIconPath) : null;
+  const defaultIcon = new URL("/default-server-icon.png", window.location.origin).toString();
 
   const [playerSearch, setPlayerSearch] = useState("");
   const [copiedAddress, setCopiedAddress] = useState(false);
@@ -138,15 +140,14 @@ export function ServerModal({
       <div style={styles.modalTopBar}>
         <div style={styles.modalTopLeft}>
           <div style={styles.modalIcon}>
-            {icon ? (
-              <img
-                src={icon}
-                alt="server icon"
-                style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
-              />
-            ) : (
-              <div style={styles.modalIconPlaceholder}>?</div>
-            )}
+            <img
+              src={icon ?? defaultIcon}
+              alt="server icon"
+              style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).src = defaultIcon;
+              }}
+            />
           </div>
 
           <div style={{ minWidth: 0 }}>
@@ -487,7 +488,7 @@ function ConsolePane({
 
 function DetailsPane({ server }: { server: ServerInfo }) {
   const rt: any = server.runtime ?? {};
-  const isOnline = !!server.running;
+  const isOnline = isServerOnline(server);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {

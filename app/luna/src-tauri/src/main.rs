@@ -411,14 +411,16 @@ fn read_server_console(
         .map_err(|e| e.to_string())?;
 
     let mut lines: Vec<String> = Vec::new();
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
+    let mut reader = BufReader::new(file);
+    for line in reader.by_ref().lines() {
         let raw = line.map_err(|e| e.to_string())?;
         let parsed = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
         if let Some(text) = parsed.get("line").and_then(|v| v.as_str()) {
             lines.push(text.to_string());
         }
     }
+
+    let consumed_to = reader.stream_position().map_err(|e| e.to_string())?;
 
     let limit = max_lines.unwrap_or(400);
     if lines.len() > limit {
@@ -428,7 +430,7 @@ fn read_server_console(
 
     Ok(ConsoleReadResult {
         lines,
-        offset: file_len,
+        offset: consumed_to,
     })
 }
 

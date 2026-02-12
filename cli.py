@@ -280,6 +280,21 @@ def _process_exists(pid: int) -> bool:
         return False
 
 
+def _tcp_port_open(port: int) -> bool:
+    if port <= 0:
+        return False
+    try:
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.3)
+        rc = sock.connect_ex(("127.0.0.1", int(port)))
+        sock.close()
+        return rc == 0
+    except Exception:
+        return False
+
+
 def _spawn_detached(args: list[str]) -> int:
     kwargs: dict = {
         "stdout": subprocess.DEVNULL,
@@ -428,9 +443,25 @@ def main(argv: List[str]) -> int:
             return 1
 
         runtime = _safe_read_json(runtime_state_path(str(server_id)))
+        runtime_state = str(runtime.get("state") or "").lower()
         server_pid = int(runtime.get("server_pid") or 0)
+
+        # Detached launchers may clear server_pid while the JVM keeps running.
+        detached = bool(runtime.get("detached_process"))
+        java_port = int(runtime.get("java_port") or 0)
+        manager_pid = int(runtime.get("manager_pid") or 0)
+
         if server_pid and _process_exists(server_pid):
             result("start_server", {"server_id": server_id, "status": "already_running", "server_pid": server_pid})
+            return 0
+        if detached and java_port > 0 and _tcp_port_open(java_port):
+            result(
+                "start_server",
+                {"server_id": server_id, "status": "already_running", "reason": "detached_process", "java_port": java_port},
+            )
+            return 0
+        if runtime_state == "starting" and manager_pid > 0 and _process_exists(manager_pid):
+            result("start_server", {"server_id": server_id, "status": "already_starting", "manager_pid": manager_pid})
             return 0
 
         edition = str(server.get("edition") or "java")

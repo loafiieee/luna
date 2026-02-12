@@ -55,6 +55,25 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
     os.replace(tmp, path)
 
 
+def _mark_runtime_stopped(server_id: str, *, reason: Optional[str] = None) -> None:
+    """Best-effort: reconcile runtime state file to stopped."""
+    st_path = runtime_state_path(str(server_id))
+    try:
+        current: Dict[str, Any] = {}
+        if st_path.exists():
+            raw = json.loads(st_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                current = raw
+        current["state"] = "stopped"
+        current["server_pid"] = None
+        current["detached_process"] = False
+        if reason:
+            current["stop_reason"] = reason
+        _atomic_write_json(st_path, current)
+    except Exception:
+        pass
+
+
 class RuntimeRecorder:
     """Writes console.ndjson + state.json for a running server."""
 
@@ -1121,8 +1140,10 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
         if not pid and detached and java_port > 0:
             pid = _pid_listening_on_tcp_port(java_port)
         if pid and not _pid_exists(pid):
+            _mark_runtime_stopped(sid, reason="pid_exited")
             return True
         if detached and java_port > 0 and not is_tcp_open("127.0.0.1", java_port):
+            _mark_runtime_stopped(sid, reason="port_closed")
             return True
         # if manager died, we still may need to kill pid
         time.sleep(0.25)
@@ -1140,11 +1161,18 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
 
     # Confirm
     if pid:
-        return not _pid_exists(pid)
+        stopped = not _pid_exists(pid)
+        if stopped:
+            _mark_runtime_stopped(sid, reason="pid_terminated")
+        return stopped
 
     if detached and java_port > 0:
-        return not is_tcp_open("127.0.0.1", java_port)
+        stopped = not is_tcp_open("127.0.0.1", java_port)
+        if stopped:
+            _mark_runtime_stopped(sid, reason="detached_port_closed")
+        return stopped
 
+    _mark_runtime_stopped(sid, reason="no_active_process")
     return True
 
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DetailTab, ServerInfo } from "./lib/types";
 import { GlobalReset } from "./components/GlobalReset";
@@ -22,6 +22,7 @@ export default function App() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [actionServerId, setActionServerId] = useState<string | null>(null);
+  const startInFlightRef = useRef<Set<string>>(new Set());
 
   function publicAddressFor(server: ServerInfo): string {
     const rt: any = server.runtime ?? {};
@@ -47,7 +48,9 @@ export default function App() {
   }
 
   async function startServer(server: ServerInfo) {
-    if (actionServerId === server.server_id) {
+    const sid = server.server_id;
+
+    if (actionServerId === sid || startInFlightRef.current.has(sid)) {
       return;
     }
 
@@ -58,34 +61,77 @@ export default function App() {
 
     setErr(null);
     addLog("info", `Start requested for "${server.name}".`);
-    setActionServerId(server.server_id);
+    startInFlightRef.current.add(sid);
+    setActionServerId(sid);
+
+    // Show immediate progress so PTY bootstrapping doesn't look like a dead click.
+    setServers((curr) =>
+      curr.map((s) =>
+        s.server_id === sid
+          ? {
+              ...s,
+              running: true,
+              runtime: { ...(s.runtime ?? {}), state: "starting", start_phase: "creating_pty" },
+            }
+          : s,
+      ),
+    );
+
     try {
-      await invoke("pty_start", {
-        serverId: server.server_id,
-        cols: 120,
-        rows: 30,
-      });
+      addLog("info", `Creating PTY session for "${server.name}"…`);
+
+      const status = await invoke<{ running: boolean }>("pty_status", { ptyId: sid });
+      if (status?.running) {
+        addLog("info", `PTY session for "${server.name}" is already active.`);
+      } else {
+        await invoke<{ pty_id: string }>("pty_start", {
+          serverId: sid,
+          cols: 120,
+          rows: 30,
+        });
+        addLog("ok", `PTY session created for "${server.name}".`);
+      }
+
       setServers((curr) =>
         curr.map((s) =>
-          s.server_id === server.server_id
+          s.server_id === sid
             ? {
                 ...s,
                 running: true,
-                runtime: { ...(s.runtime ?? {}), state: "starting" },
+                runtime: { ...(s.runtime ?? {}), state: "starting", start_phase: "waiting_for_runtime" },
               }
             : s,
         ),
       );
-      addLog("info", `Waiting for server "${server.name}" to start…`);
+
+      addLog("info", `PTY attached. Waiting for runtime state for "${server.name}"…`);
+
+      // Refresh quickly and then again a bit later to capture slow JVM/script startup.
       window.setTimeout(() => {
         void refresh({ silent: true });
-      }, 350);
+      }, 300);
+      window.setTimeout(() => {
+        void refresh({ silent: true });
+      }, 1500);
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);
       addLog("err", `Start failed: ${msg}`);
+
+      setServers((curr) =>
+        curr.map((s) =>
+          s.server_id === sid
+            ? {
+                ...s,
+                running: false,
+                runtime: { ...(s.runtime ?? {}), state: "stopped", start_phase: "failed" },
+              }
+            : s,
+        ),
+      );
     } finally {
-      setActionServerId((curr) => (curr === server.server_id ? null : curr));
+      startInFlightRef.current.delete(sid);
+      setActionServerId((curr) => (curr === sid ? null : curr));
     }
   }
 

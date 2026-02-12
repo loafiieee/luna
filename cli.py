@@ -185,8 +185,18 @@ def _enrich_servers_for_ui(servers: list[dict]) -> list[dict]:
         folder = str(item.get("folder") or "")
         server_id = str(item.get("server_id") or "")
 
+        if not folder:
+            platform = str(item.get("platform") or "")
+            version = str(item.get("version") or "")
+            name = str(item.get("name") or "")
+            if platform and version and name:
+                inferred = f"{platform}-{version}-{name}"
+                if (base_servers_dir / inferred).exists():
+                    folder = inferred
+                    item["folder"] = inferred
+
         server_dir = base_servers_dir / folder if folder else None
-        if server_dir is not None:
+        if server_dir is not None and server_dir.exists():
             item["server_dir"] = str(server_dir)
 
             icon_candidates = [
@@ -203,7 +213,9 @@ def _enrich_servers_for_ui(servers: list[dict]) -> list[dict]:
             raw_max_players = props.get("max-players")
             try:
                 if raw_max_players is not None:
-                    item["max_players"] = int(raw_max_players)
+                    max_players = int(raw_max_players)
+                    item["max_players"] = max_players
+                    item["maxPlayers"] = max_players
             except Exception:
                 pass
 

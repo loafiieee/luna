@@ -21,6 +21,7 @@ from backend.utils.paths import (
     runtime_console_path,
     runtime_state_path,
     runtime_control_path,
+    servers_dir,
 )
 
 # Import tunnel + emitter in a way that works whether this is executed as a script
@@ -53,6 +54,25 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
+
+
+def _mark_runtime_stopped(server_id: str, *, reason: Optional[str] = None) -> None:
+    """Best-effort: reconcile runtime state file to stopped."""
+    st_path = runtime_state_path(str(server_id))
+    try:
+        current: Dict[str, Any] = {}
+        if st_path.exists():
+            raw = json.loads(st_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                current = raw
+        current["state"] = "stopped"
+        current["server_pid"] = None
+        current["detached_process"] = False
+        if reason:
+            current["stop_reason"] = reason
+        _atomic_write_json(st_path, current)
+    except Exception:
+        pass
 
 
 class RuntimeRecorder:
@@ -973,6 +993,86 @@ def ensure_ports(*, server_config: dict, server_dir: str) -> tuple[int, int, Opt
     return java_port, bedrock_port, voice_local_port
 
 
+def _read_max_players_from_properties(server_dir: str) -> Optional[int]:
+    props_path = Path(server_dir) / "server.properties"
+    try:
+        if not props_path.exists():
+            return None
+        for raw in props_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == "max-players":
+                return int(v.strip())
+    except Exception:
+        return None
+    return None
+
+
+def _sample_process_metrics(pid: int) -> Tuple[Optional[float], Optional[float]]:
+    """Return cpu_percent, ram_mb best-effort."""
+    if pid <= 0:
+        return None, None
+    try:
+        if os.name == "nt":
+            out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], text=True, errors="ignore")
+            row = out.strip()
+            if not row or row.startswith("INFO:"):
+                return None, None
+            parts = [p.strip().strip('"') for p in row.split(",")]
+            mem_raw = parts[-2] if len(parts) >= 5 else ""
+            digits = "".join(ch for ch in mem_raw if ch.isdigit())
+            ram_mb = float(digits) / 1024.0 if digits else None
+            return None, ram_mb
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "%cpu=,rss="], text=True, errors="ignore")
+        line = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+        if not line:
+            return None, None
+        chunks = line.split()
+        cpu = float(chunks[0]) if chunks else None
+        rss_kb = float(chunks[1]) if len(chunks) > 1 else None
+        ram_mb = (rss_kb / 1024.0) if rss_kb is not None else None
+        return cpu, ram_mb
+    except Exception:
+        return None, None
+
+
+def _resolve_metrics_pid(state: Dict[str, Any]) -> int:
+    pid = int(state.get("server_pid") or 0)
+    if pid > 0 and _pid_exists(pid):
+        return pid
+    if bool(state.get("detached_process")) and int(state.get("java_port") or 0) > 0:
+        p = _pid_listening_on_tcp_port(int(state.get("java_port") or 0))
+        if p > 0:
+            return p
+    return 0
+
+
+def _metrics_loop(*, state: Dict[str, Any], recorder: RuntimeRecorder, stop_evt: threading.Event) -> None:
+    while not stop_evt.is_set():
+        try:
+            pid = _resolve_metrics_pid(state)
+            cpu, ram = _sample_process_metrics(pid)
+            if cpu is not None:
+                state["cpu_percent"] = round(float(cpu), 2)
+            if ram is not None:
+                state["ram_mb"] = round(float(ram), 2)
+            hist = state.get("cpu_history")
+            if not isinstance(hist, list):
+                hist = []
+            hist.append(float(cpu) if cpu is not None else 0.0)
+            if len(hist) > 24:
+                hist = hist[-24:]
+            state["cpu_history"] = hist
+            state["metrics_updated_at"] = time.time()
+            recorder.write_state(state)
+        except Exception:
+            pass
+        time.sleep(2.0)
+
+
+
 # ---------------- Process / IO piping ----------------
 
 
@@ -992,7 +1092,7 @@ def _make_popen_kwargs() -> dict:
     return kw
 
 
-def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRecorder, stop_evt: threading.Event) -> None:
+def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRecorder, state: Dict[str, Any], stop_evt: threading.Event) -> None:
     try:
         if proc.stdout is None:
             return
@@ -1008,6 +1108,16 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
             _emit_console(server_id=server_id, line=clean)
             # Persist for reattach
             recorder.write_console(clean)
+
+            # Parse player count from common Minecraft log lines.
+            m = re.search(r"There are\s+(\d+)\s+of a max(?:imum)? of\s+(\d+)\s+players online", clean, flags=re.IGNORECASE)
+            if m:
+                try:
+                    state["players_online"] = int(m.group(1))
+                    state["max_players"] = int(m.group(2))
+                    recorder.write_state(state)
+                except Exception:
+                    pass
     except Exception as e:
         warn(f"[server:{server_id}] output pump error: {e}")
 
@@ -1121,8 +1231,10 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
         if not pid and detached and java_port > 0:
             pid = _pid_listening_on_tcp_port(java_port)
         if pid and not _pid_exists(pid):
+            _mark_runtime_stopped(sid, reason="pid_exited")
             return True
         if detached and java_port > 0 and not is_tcp_open("127.0.0.1", java_port):
+            _mark_runtime_stopped(sid, reason="port_closed")
             return True
         # if manager died, we still may need to kill pid
         time.sleep(0.25)
@@ -1140,11 +1252,18 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
 
     # Confirm
     if pid:
-        return not _pid_exists(pid)
+        stopped = not _pid_exists(pid)
+        if stopped:
+            _mark_runtime_stopped(sid, reason="pid_terminated")
+        return stopped
 
     if detached and java_port > 0:
-        return not is_tcp_open("127.0.0.1", java_port)
+        stopped = not is_tcp_open("127.0.0.1", java_port)
+        if stopped:
+            _mark_runtime_stopped(sid, reason="detached_port_closed")
+        return stopped
 
+    _mark_runtime_stopped(sid, reason="no_active_process")
     return True
 
 
@@ -1216,7 +1335,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
     info(f"Running {edition} server: {platform}-{version}-{name} with {ram}MB RAM and EULA accepted: {eula}")
 
-    server_dir = os.path.join("servers", str(folder))
+    server_dir = str(servers_dir() / str(folder))
 
     if not os.path.isdir(server_dir):
         error(f"Server folder missing: {server_dir}")
@@ -1233,6 +1352,8 @@ def run_server(edition: str, platform: str, version: str, name: str):
     proc: Optional[subprocess.Popen] = None
 
     # Runtime state
+    max_players = _read_max_players_from_properties(server_dir)
+
     state: Dict[str, Any] = {
         "server_id": server_id,
         "platform": platform,
@@ -1249,6 +1370,9 @@ def run_server(edition: str, platform: str, version: str, name: str):
         "tunneling": tunneling,
         "sticky_address": sticky_address,
         "started_at": time.time(),
+        "max_players": max_players,
+        "players_online": 0,
+        "cpu_history": [],
     }
     recorder.write_state(state)
     _emit_state(
@@ -1391,9 +1515,10 @@ def run_server(edition: str, platform: str, version: str, name: str):
         recorder.write_state(state)
 
         # Start piping
-        threading.Thread(target=_pump_stdout, args=(proc,), kwargs={"server_id": server_id, "recorder": recorder, "stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_pump_stdout, args=(proc,), kwargs={"server_id": server_id, "recorder": recorder, "state": state, "stop_evt": stop_evt}, daemon=True).start()
         threading.Thread(target=_pump_stdin_from_parent, args=(proc,), kwargs={"stop_evt": stop_evt}, daemon=True).start()
         threading.Thread(target=_pump_control_file, args=(proc,), kwargs={"control_path": recorder.control_path, "stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_metrics_loop, kwargs={"state": state, "recorder": recorder, "stop_evt": stop_evt}, daemon=True).start()
 
         # ---- Readiness + tunnel (bedrock-only starts tunnel after readiness) ----
         if edition == "java":

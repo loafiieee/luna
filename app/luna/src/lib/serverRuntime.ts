@@ -11,12 +11,12 @@ const PLAYER_LIST_KEYS = [
 ];
 
 export function isServerOnline(server: ServerInfo): boolean {
-  if (typeof server.running === "boolean") return server.running;
-
   const rt: any = server.runtime ?? {};
   const state = String(rt.state ?? rt.status ?? "").toLowerCase();
   if (["running", "starting", "online", "up"].includes(state)) return true;
   if (["stopped", "stopping", "offline", "down", "error", "crashed"].includes(state)) return false;
+
+  if (typeof server.running === "boolean") return server.running;
 
   return typeof server.pid === "number" && server.pid > 0;
 }
@@ -67,11 +67,20 @@ export function maxPlayersFor(server: ServerInfo): string {
     rt.maxPlayers,
     rt.max_players,
     rt.maxplayers,
+    rt["max-players"],
     rt.players_max,
     rt.player_limit,
     rt?.players?.max,
     rt?.status?.max_players,
+    rt?.status?.players_max,
+    rt?.server_properties?.max_players,
+    rt?.server_properties?.["max-players"],
+    rt?.properties?.max_players,
+    rt?.properties?.["max-players"],
+    rt?.config?.max_players,
+    rt?.config?.["max-players"],
     (server as any).max_players,
+    (server as any).maxPlayers,
     (server as any).player_limit,
   ];
 

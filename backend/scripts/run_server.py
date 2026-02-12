@@ -173,6 +173,93 @@ def _can_bind_udp(port: int) -> bool:
         return False
 
 
+def _pid_listening_on_tcp_port(port: int) -> int:
+    """Best-effort PID lookup for a listening TCP port."""
+    try:
+        p = int(port)
+    except Exception:
+        return 0
+
+    if p <= 0:
+        return 0
+
+    try:
+        if os.name == "nt":
+            # netstat output line ends with PID on Windows
+            out = subprocess.check_output(["netstat", "-ano", "-p", "tcp"], text=True, errors="ignore")
+            needle = f":{p}"
+            for line in out.splitlines():
+                low = line.strip().lower()
+                if "listen" not in low:
+                    continue
+                if needle not in line:
+                    continue
+                parts = line.split()
+                if parts:
+                    try:
+                        pid = int(parts[-1])
+                        if pid > 0:
+                            return pid
+                    except Exception:
+                        continue
+        else:
+            # Try ss first
+            try:
+                out = subprocess.check_output(["ss", "-ltnp"], text=True, errors="ignore")
+                needle = f":{p}"
+                for line in out.splitlines():
+                    if needle not in line:
+                        continue
+                    if "LISTEN" not in line.upper():
+                        continue
+                    marker = "pid="
+                    idx = line.find(marker)
+                    if idx == -1:
+                        continue
+                    tail = line[idx + len(marker) :]
+                    pid_digits = ""
+                    for ch in tail:
+                        if ch.isdigit():
+                            pid_digits += ch
+                        else:
+                            break
+                    if pid_digits:
+                        pid = int(pid_digits)
+                        if pid > 0:
+                            return pid
+            except Exception:
+                pass
+
+            # Fallback to lsof when ss is unavailable
+            try:
+                out = subprocess.check_output(["lsof", "-nP", f"-iTCP:{p}", "-sTCP:LISTEN", "-t"], text=True, errors="ignore")
+                for line in out.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    pid = int(line)
+                    if pid > 0:
+                        return pid
+            except Exception:
+                pass
+
+            # Last fallback to fuser
+            try:
+                out = subprocess.check_output(["fuser", "-n", "tcp", str(p)], text=True, errors="ignore")
+                for tok in out.replace("\n", " ").split():
+                    tok = tok.strip().strip(":")
+                    if tok.isdigit():
+                        pid = int(tok)
+                        if pid > 0:
+                            return pid
+            except Exception:
+                pass
+    except Exception:
+        return 0
+
+    return 0
+
+
 def _is_reserved(port: int, ranges: List[Tuple[int, int]]) -> bool:
     for a, b in ranges:
         if a <= port <= b:
@@ -1014,6 +1101,11 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
 
     pid = int(state.get("server_pid") or 0)
     mgr_pid = int(state.get("manager_pid") or 0)
+    detached = bool(state.get("detached_process"))
+    java_port = int(state.get("java_port") or 0)
+
+    if pid <= 0 and detached and java_port > 0:
+        pid = _pid_listening_on_tcp_port(java_port)
 
     # Ask manager to stop gracefully if it exists
     try:
@@ -1025,12 +1117,20 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
 
     end = time.time() + timeout_s
     while time.time() < end:
+        # Detached launchers may not expose a stable PID in state, so keep re-resolving.
+        if not pid and detached and java_port > 0:
+            pid = _pid_listening_on_tcp_port(java_port)
         if pid and not _pid_exists(pid):
+            return True
+        if detached and java_port > 0 and not is_tcp_open("127.0.0.1", java_port):
             return True
         # if manager died, we still may need to kill pid
         time.sleep(0.25)
 
     # Fallback: kill server pid
+    if not pid and detached and java_port > 0:
+        pid = _pid_listening_on_tcp_port(java_port)
+
     if pid:
         _terminate_pid(pid, timeout_s=8.0)
 
@@ -1041,6 +1141,10 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
     # Confirm
     if pid:
         return not _pid_exists(pid)
+
+    if detached and java_port > 0:
+        return not is_tcp_open("127.0.0.1", java_port)
+
     return True
 
 
@@ -1363,9 +1467,26 @@ def run_server(edition: str, platform: str, version: str, name: str):
         )
 
         # ---- Monitor: stop tunnel when server exits or java TCP port closes ----
+        detached_server_detected = False
         while True:
             code = proc.poll()
             if code is not None:
+                # Some launch scripts (notably certain forge/neoforge run scripts) can
+                # spawn the real JVM process and then exit immediately. In that case the
+                # wrapper process is gone but the server is still online.
+                if edition in ("java", "both") and is_tcp_open("127.0.0.1", int(java_port)):
+                    if not detached_server_detected:
+                        detached_server_detected = True
+                        state["server_pid"] = None
+                        state["detached_process"] = True
+                        state["state"] = "running"
+                        recorder.write_state(state)
+                        warn(
+                            "[runtime] launcher process exited but server port is still open; "
+                            "keeping state as running (detached server process detected)."
+                        )
+                    time.sleep(1.0)
+                    continue
                 break
 
             if tunnel_started and tcp_ready_once and edition in ("java", "both"):

@@ -47,16 +47,19 @@ export default function App() {
   }
 
   async function startServer(server: ServerInfo) {
+    if (actionServerId === server.server_id) {
+      return;
+    }
+
+    if (isServerOnline(server)) {
+      addLog("warn", `Server "${server.name}" is already starting/running.`);
+      return;
+    }
+
     setErr(null);
     addLog("info", `Start requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
-      try {
-        await invoke("pty_stop", { ptyId: server.server_id });
-      } catch {
-        // no stale PTY to clear
-      }
-
       await invoke("pty_start", {
         serverId: server.server_id,
         cols: 120,

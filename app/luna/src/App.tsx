@@ -85,6 +85,13 @@ export default function App() {
     addLog("info", `Stop requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
+      try {
+        await invoke("send_server_console_command", { serverId: server.server_id, command: "stop" });
+        addLog("info", `Sent console stop command to "${server.name}".`);
+      } catch (e: any) {
+        addLog("warn", `Could not send console stop command for "${server.name}": ${String(e)}`);
+      }
+
       const res = await cli<{ server_id: string; stopped: boolean }>("stop_server", server.server_id);
       const stopped = !!res?.data?.stopped;
       setServers((curr) =>
@@ -233,6 +240,7 @@ export default function App() {
             onRequestClose={() => setSelected(null)}
             onRename={(name) => renameServer(selectedServer, name)}
             onDelete={() => deleteServer(selectedServer)}
+            onLiveRefresh={() => refresh({ silent: true })}
             addLog={addLog}
           />
         </Overlay>

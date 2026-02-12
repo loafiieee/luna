@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from typing import Dict, List, Optional, Set, Tuple
 
 from backend.utils.get_versions import *
@@ -295,6 +296,35 @@ def _tcp_port_open(port: int) -> bool:
         return False
 
 
+
+
+def _seed_runtime_starting(server_id: str, *, server: dict, manager_pid: int) -> None:
+    """Write an immediate runtime 'starting' state to avoid UI start/stop flicker."""
+    try:
+        rt_path = runtime_state_path(str(server_id))
+        rt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        current = _safe_read_json(rt_path)
+        merged: dict = dict(current) if isinstance(current, dict) else {}
+
+        merged.update({
+            "server_id": str(server_id),
+            "platform": str(server.get("platform") or ""),
+            "version": str(server.get("version") or ""),
+            "name": str(server.get("name") or ""),
+            "folder": str(server.get("folder") or ""),
+            "edition": str(server.get("edition") or "java"),
+            "state": "starting",
+            "manager_pid": int(manager_pid),
+            "server_pid": None,
+            "detached_process": False,
+            "start_requested_at": time.time(),
+        })
+
+        rt_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    except Exception:
+        # Best-effort only: server manager process will write authoritative runtime state shortly.
+        pass
 def _spawn_detached(args: list[str]) -> int:
     kwargs: dict = {
         "stdout": subprocess.DEVNULL,
@@ -478,6 +508,8 @@ def main(argv: List[str]) -> int:
             child_args = [sys.executable, "run_server", edition, platform, version, name]
 
         manager_pid = _spawn_detached(child_args)
+        _seed_runtime_starting(server_id, server=server, manager_pid=manager_pid)
+
         result("start_server", {
             "server_id": server_id,
             "status": "starting",

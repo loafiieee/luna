@@ -85,19 +85,23 @@ export default function App() {
     addLog("info", `Stop requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
-      await cli("stop_server", server.server_id);
+      const res = await cli<{ server_id: string; stopped: boolean }>("stop_server", server.server_id);
+      const stopped = !!res?.data?.stopped;
       setServers((curr) =>
         curr.map((s) =>
           s.server_id === server.server_id
             ? {
                 ...s,
-                running: false,
-                runtime: { ...(s.runtime ?? {}), state: "stopping" },
+                running: stopped ? false : s.running,
+                runtime: {
+                  ...(s.runtime ?? {}),
+                  state: stopped ? "stopped" : "stopping",
+                },
               }
             : s,
         ),
       );
-      addLog("ok", `Stop command sent for "${server.name}".`);
+      addLog(stopped ? "ok" : "warn", stopped ? `Stopped "${server.name}".` : `Stop requested for "${server.name}" but server may still be shutting down.`);
       void refresh({ silent: true });
     } catch (e: any) {
       const msg = String(e);

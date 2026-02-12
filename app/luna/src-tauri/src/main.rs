@@ -174,15 +174,23 @@ async fn run_cli_json(args: Vec<String>) -> Result<Value, String> {
       .output()
       .map_err(|e| e.to_string())?;
 
-    if !output.status.success() {
-      let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-      let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-      let message = extract_cli_error_message(&stdout, &stderr);
-      return Err(format!("cli failed: {message}"));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if output.status.success() {
+      return parse_cli_json_output(&stdout);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    parse_cli_json_output(&stdout)
+    // Some CLI paths can emit a structured JSON result payload even when the
+    // process exits non-zero. Preserve that structured response for the UI
+    // instead of converting everything into a hard transport error.
+    if let Ok(parsed) = parse_cli_json_output(&stdout) {
+      if parsed.get("event").and_then(|e| e.as_str()) == Some("result") {
+        return Ok(parsed);
+      }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let message = extract_cli_error_message(&stdout, &stderr);
+    Err(format!("cli failed: {message}"))
   })
   .await
   .map_err(|e| e.to_string())?

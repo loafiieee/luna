@@ -22,6 +22,7 @@ export type ServerModalProps = {
   actionBusy: boolean;
   isOnline: boolean;
   onDelete: () => Promise<void>;
+  onLiveRefresh: () => void;
   addLog: (level: "info" | "ok" | "warn" | "err", msg: string) => void;
 };
 
@@ -37,6 +38,7 @@ export function ServerModal({
   onRequestClose,
   onRename,
   onDelete,
+  onLiveRefresh,
   addLog,
   isOnline,
   actionBusy,
@@ -80,12 +82,11 @@ export function ServerModal({
   }, [server.name]);
 
   useEffect(() => {
-    if (!copiedAddress) return;
-    const t = window.setTimeout(() => setCopiedAddress(false), 1600);
-    return () => window.clearTimeout(t);
-  }, [copiedAddress]);
-
-
+    const id = window.setInterval(() => {
+      onLiveRefresh();
+    }, 1200);
+    return () => window.clearInterval(id);
+  }, [onLiveRefresh]);
 
   async function submitRename() {
     const next = nameDraft.trim();

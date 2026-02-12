@@ -240,6 +240,7 @@ export default function App() {
             onRequestClose={() => setSelected(null)}
             onRename={(name) => renameServer(selectedServer, name)}
             onDelete={() => deleteServer(selectedServer)}
+            onLiveRefresh={() => refresh({ silent: true })}
             addLog={addLog}
           />
         </Overlay>

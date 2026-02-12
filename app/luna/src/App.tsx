@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DetailTab, ServerInfo } from "./lib/types";
 import { GlobalReset } from "./components/GlobalReset";
@@ -23,6 +23,7 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null);
   const [actionServerId, setActionServerId] = useState<string | null>(null);
   const startInFlightRef = useRef<Set<string>>(new Set());
+  const [pendingStarts, setPendingStarts] = useState<Record<string, number>>({});
 
   function publicAddressFor(server: ServerInfo): string {
     const rt: any = server.runtime ?? {};
@@ -47,6 +48,10 @@ export default function App() {
     return pub;
   }
 
+  function uiServerOnline(server: ServerInfo): boolean {
+    return isServerOnline(server) || !!pendingStarts[server.server_id];
+  }
+
   async function startServer(server: ServerInfo) {
     const sid = server.server_id;
 
@@ -63,6 +68,7 @@ export default function App() {
     addLog("info", `Start requested for "${server.name}".`);
     startInFlightRef.current.add(sid);
     setActionServerId(sid);
+    setPendingStarts((curr) => ({ ...curr, [sid]: Date.now() }));
 
     // Show immediate progress so PTY bootstrapping doesn't look like a dead click.
     setServers((curr) =>
@@ -129,6 +135,11 @@ export default function App() {
             : s,
         ),
       );
+      setPendingStarts((curr) => {
+        const next = { ...curr };
+        delete next[sid];
+        return next;
+      });
     } finally {
       startInFlightRef.current.delete(sid);
       setActionServerId((curr) => (curr === sid ? null : curr));
@@ -138,6 +149,11 @@ export default function App() {
   async function stopServer(server: ServerInfo) {
     setErr(null);
     addLog("info", `Stop requested for "${server.name}".`);
+    setPendingStarts((curr) => {
+      const next = { ...curr };
+      delete next[server.server_id];
+      return next;
+    });
     setActionServerId(server.server_id);
     try {
       try {
@@ -211,6 +227,70 @@ export default function App() {
       throw e;
     }
   }
+
+  useEffect(() => {
+    const pendingIds = Object.keys(pendingStarts);
+    if (pendingIds.length === 0) return;
+
+    const intervalId = window.setInterval(() => {
+      void (async () => {
+        const serverById = new Map(sortedServers.map((s) => [s.server_id, s]));
+        const clearIds: string[] = [];
+
+        for (const sid of pendingIds) {
+          const server = serverById.get(sid);
+          const state = String((server?.runtime as any)?.state ?? "").toLowerCase();
+          const ageMs = Date.now() - (pendingStarts[sid] ?? Date.now());
+
+          if (state === "running" || state === "online" || state === "up") {
+            clearIds.push(sid);
+            continue;
+          }
+
+          let ptyRunning = false;
+          try {
+            const status = await invoke<{ running: boolean }>("pty_status", { ptyId: sid });
+            ptyRunning = !!status?.running;
+          } catch {
+            ptyRunning = false;
+          }
+
+          if (ptyRunning) {
+            setServers((curr) =>
+              curr.map((s) =>
+                s.server_id === sid && !isServerOnline(s)
+                  ? {
+                      ...s,
+                      running: true,
+                      runtime: { ...(s.runtime ?? {}), state: "starting", start_phase: "waiting_for_runtime" },
+                    }
+                  : s,
+              ),
+            );
+            continue;
+          }
+
+          if (ageMs > 15000) {
+            clearIds.push(sid);
+            if (server && !isServerOnline(server)) {
+              addLog("warn", `Startup for "${server.name}" did not complete (PTY exited before runtime became online).`);
+            }
+          }
+        }
+
+        if (clearIds.length > 0) {
+          setPendingStarts((curr) => {
+            const next = { ...curr };
+            for (const sid of clearIds) delete next[sid];
+            return next;
+          });
+        }
+      })();
+    }, 800);
+
+    return () => window.clearInterval(intervalId);
+  }, [addLog, pendingStarts, setServers, sortedServers]);
+
   const selectedServer = useMemo(() => {
     if (!selected) return null;
     return sortedServers.find((s) => s.server_id === selected.server_id) ?? selected;
@@ -245,13 +325,13 @@ export default function App() {
               onlinePlayers={playersOnline(s)}
               maxPlayers={maxPlayersFor(s)}
               actionBusy={actionServerId === s.server_id}
-              isOnline={isServerOnline(s)}
+              isOnline={uiServerOnline(s)}
             />
           ))
         )}
       </div>
     );
-  }, [actionServerId, sortedServers, loading, refresh]);
+  }, [actionServerId, sortedServers, loading, pendingStarts, refresh]);
 
   return (
     <div style={styles.app}>
@@ -297,7 +377,7 @@ export default function App() {
             onStart={() => startServer(selectedServer)}
             onStop={() => stopServer(selectedServer)}
             actionBusy={actionServerId === selectedServer.server_id}
-            isOnline={isServerOnline(selectedServer)}
+            isOnline={uiServerOnline(selectedServer)}
             onRequestClose={() => setSelected(null)}
             onRename={(name) => renameServer(selectedServer, name)}
             onDelete={() => deleteServer(selectedServer)}

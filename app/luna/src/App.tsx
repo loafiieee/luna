@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DetailTab, ServerInfo } from "./lib/types";
 import { GlobalReset } from "./components/GlobalReset";
@@ -22,6 +22,8 @@ export default function App() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [actionServerId, setActionServerId] = useState<string | null>(null);
+  const startInFlightRef = useRef<Set<string>>(new Set());
+  const [pendingStarts, setPendingStarts] = useState<Record<string, number>>({});
 
   function publicAddressFor(server: ServerInfo): string {
     const rt: any = server.runtime ?? {};
@@ -46,8 +48,14 @@ export default function App() {
     return pub;
   }
 
+  function uiServerOnline(server: ServerInfo): boolean {
+    return isServerOnline(server) || !!pendingStarts[server.server_id];
+  }
+
   async function startServer(server: ServerInfo) {
-    if (actionServerId === server.server_id) {
+    const sid = server.server_id;
+
+    if (actionServerId === sid || startInFlightRef.current.has(sid)) {
       return;
     }
 
@@ -58,40 +66,94 @@ export default function App() {
 
     setErr(null);
     addLog("info", `Start requested for "${server.name}".`);
-    setActionServerId(server.server_id);
+    startInFlightRef.current.add(sid);
+    setActionServerId(sid);
+    setPendingStarts((curr) => ({ ...curr, [sid]: Date.now() }));
+
+    // Show immediate progress so PTY bootstrapping doesn't look like a dead click.
+    setServers((curr) =>
+      curr.map((s) =>
+        s.server_id === sid
+          ? {
+              ...s,
+              running: true,
+              runtime: { ...(s.runtime ?? {}), state: "starting", start_phase: "creating_pty" },
+            }
+          : s,
+      ),
+    );
+
     try {
-      await invoke("pty_start", {
-        serverId: server.server_id,
-        cols: 120,
-        rows: 30,
-      });
+      addLog("info", `Creating PTY session for "${server.name}"…`);
+
+      const status = await invoke<{ running: boolean }>("pty_status", { ptyId: sid });
+      if (status?.running) {
+        addLog("info", `PTY session for "${server.name}" is already active.`);
+      } else {
+        await invoke<{ pty_id: string }>("pty_start", {
+          serverId: sid,
+          cols: 120,
+          rows: 30,
+        });
+        addLog("ok", `PTY session created for "${server.name}".`);
+      }
+
       setServers((curr) =>
         curr.map((s) =>
-          s.server_id === server.server_id
+          s.server_id === sid
             ? {
                 ...s,
                 running: true,
-                runtime: { ...(s.runtime ?? {}), state: "starting" },
+                runtime: { ...(s.runtime ?? {}), state: "starting", start_phase: "waiting_for_runtime" },
               }
             : s,
         ),
       );
-      addLog("info", `Waiting for server "${server.name}" to start…`);
+
+      addLog("info", `PTY attached. Waiting for runtime state for "${server.name}"…`);
+
+      // Refresh quickly and then again a bit later to capture slow JVM/script startup.
       window.setTimeout(() => {
         void refresh({ silent: true });
-      }, 350);
+      }, 300);
+      window.setTimeout(() => {
+        void refresh({ silent: true });
+      }, 1500);
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);
       addLog("err", `Start failed: ${msg}`);
+
+      setServers((curr) =>
+        curr.map((s) =>
+          s.server_id === sid
+            ? {
+                ...s,
+                running: false,
+                runtime: { ...(s.runtime ?? {}), state: "stopped", start_phase: "failed" },
+              }
+            : s,
+        ),
+      );
+      setPendingStarts((curr) => {
+        const next = { ...curr };
+        delete next[sid];
+        return next;
+      });
     } finally {
-      setActionServerId((curr) => (curr === server.server_id ? null : curr));
+      startInFlightRef.current.delete(sid);
+      setActionServerId((curr) => (curr === sid ? null : curr));
     }
   }
 
   async function stopServer(server: ServerInfo) {
     setErr(null);
     addLog("info", `Stop requested for "${server.name}".`);
+    setPendingStarts((curr) => {
+      const next = { ...curr };
+      delete next[server.server_id];
+      return next;
+    });
     setActionServerId(server.server_id);
     try {
       try {
@@ -165,6 +227,70 @@ export default function App() {
       throw e;
     }
   }
+
+  useEffect(() => {
+    const pendingIds = Object.keys(pendingStarts);
+    if (pendingIds.length === 0) return;
+
+    const intervalId = window.setInterval(() => {
+      void (async () => {
+        const serverById = new Map(sortedServers.map((s) => [s.server_id, s]));
+        const clearIds: string[] = [];
+
+        for (const sid of pendingIds) {
+          const server = serverById.get(sid);
+          const state = String((server?.runtime as any)?.state ?? "").toLowerCase();
+          const ageMs = Date.now() - (pendingStarts[sid] ?? Date.now());
+
+          if (state === "running" || state === "online" || state === "up") {
+            clearIds.push(sid);
+            continue;
+          }
+
+          let ptyRunning = false;
+          try {
+            const status = await invoke<{ running: boolean }>("pty_status", { ptyId: sid });
+            ptyRunning = !!status?.running;
+          } catch {
+            ptyRunning = false;
+          }
+
+          if (ptyRunning) {
+            setServers((curr) =>
+              curr.map((s) =>
+                s.server_id === sid && !isServerOnline(s)
+                  ? {
+                      ...s,
+                      running: true,
+                      runtime: { ...(s.runtime ?? {}), state: "starting", start_phase: "waiting_for_runtime" },
+                    }
+                  : s,
+              ),
+            );
+            continue;
+          }
+
+          if (ageMs > 15000) {
+            clearIds.push(sid);
+            if (server && !isServerOnline(server)) {
+              addLog("warn", `Startup for "${server.name}" did not complete (PTY exited before runtime became online).`);
+            }
+          }
+        }
+
+        if (clearIds.length > 0) {
+          setPendingStarts((curr) => {
+            const next = { ...curr };
+            for (const sid of clearIds) delete next[sid];
+            return next;
+          });
+        }
+      })();
+    }, 800);
+
+    return () => window.clearInterval(intervalId);
+  }, [addLog, pendingStarts, setServers, sortedServers]);
+
   const selectedServer = useMemo(() => {
     if (!selected) return null;
     return sortedServers.find((s) => s.server_id === selected.server_id) ?? selected;
@@ -199,13 +325,13 @@ export default function App() {
               onlinePlayers={playersOnline(s)}
               maxPlayers={maxPlayersFor(s)}
               actionBusy={actionServerId === s.server_id}
-              isOnline={isServerOnline(s)}
+              isOnline={uiServerOnline(s)}
             />
           ))
         )}
       </div>
     );
-  }, [actionServerId, sortedServers, loading, refresh]);
+  }, [actionServerId, sortedServers, loading, pendingStarts, refresh]);
 
   return (
     <div style={styles.app}>
@@ -251,7 +377,7 @@ export default function App() {
             onStart={() => startServer(selectedServer)}
             onStop={() => stopServer(selectedServer)}
             actionBusy={actionServerId === selectedServer.server_id}
-            isOnline={isServerOnline(selectedServer)}
+            isOnline={uiServerOnline(selectedServer)}
             onRequestClose={() => setSelected(null)}
             onRename={(name) => renameServer(selectedServer, name)}
             onDelete={() => deleteServer(selectedServer)}

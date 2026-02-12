@@ -21,6 +21,7 @@ from backend.utils.paths import (
     runtime_console_path,
     runtime_state_path,
     runtime_control_path,
+    servers_dir,
 )
 
 # Import tunnel + emitter in a way that works whether this is executed as a script
@@ -1334,7 +1335,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
 
     info(f"Running {edition} server: {platform}-{version}-{name} with {ram}MB RAM and EULA accepted: {eula}")
 
-    server_dir = os.path.join("servers", str(folder))
+    server_dir = str(servers_dir() / str(folder))
 
     if not os.path.isdir(server_dir):
         error(f"Server folder missing: {server_dir}")

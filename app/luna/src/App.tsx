@@ -51,11 +51,7 @@ export default function App() {
     addLog("info", `Start requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
-      await invoke("pty_start", {
-        serverId: server.server_id,
-        cols: 120,
-        rows: 30,
-      });
+      await cli<{ server_id: string; status: string }>("start_server", server.server_id);
       setServers((curr) =>
         curr.map((s) =>
           s.server_id === server.server_id

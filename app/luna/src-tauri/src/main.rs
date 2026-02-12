@@ -40,6 +40,24 @@ fn server_runtime_dir(server_id: &str) -> Result<PathBuf, String> {
   Ok(app_data_dir()?.join("runtime").join(server_id))
 }
 
+
+fn runtime_state_value(server_id: &str) -> Option<Value> {
+  let path = server_runtime_dir(server_id).ok()?.join("state.json");
+  let raw = std::fs::read_to_string(path).ok()?;
+  serde_json::from_str::<Value>(&raw).ok()
+}
+
+fn runtime_indicates_running(server_id: &str) -> bool {
+  let state = runtime_state_value(server_id);
+  let Some(v) = state else { return false; };
+  let text = v
+    .get("state")
+    .and_then(|x| x.as_str())
+    .unwrap_or("")
+    .to_ascii_lowercase();
+  matches!(text.as_str(), "running" | "starting" | "online" | "up")
+}
+
 #[derive(Serialize)]
 struct ConsoleReadResult {
   lines: Vec<String>,
@@ -205,9 +223,15 @@ fn pty_start(server_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<
 
   let mut sessions = PTY_SESSIONS.lock().map_err(|_| "pty lock poisoned".to_string())?;
   if let Some(existing) = sessions.get_mut(&pty_id) {
-    let running = existing.child.try_wait().map_err(|e| e.to_string())?.is_none();
-    if running {
+    let child_running = existing.child.try_wait().map_err(|e| e.to_string())?.is_none();
+    if child_running && runtime_indicates_running(&server_id) {
       return Ok(PtyStartResult { pty_id });
+    }
+
+    if child_running {
+      let _ = existing.writer.write_all(b"stop\n");
+      let _ = existing.writer.flush();
+      let _ = existing.child.kill();
     }
   }
   sessions.remove(&pty_id);

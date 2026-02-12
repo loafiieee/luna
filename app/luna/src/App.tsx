@@ -51,7 +51,17 @@ export default function App() {
     addLog("info", `Start requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
-      await cli<{ server_id: string; status: string }>("start_server", server.server_id);
+      try {
+        await invoke("pty_stop", { ptyId: server.server_id });
+      } catch {
+        // no stale PTY to clear
+      }
+
+      await invoke("pty_start", {
+        serverId: server.server_id,
+        cols: 120,
+        rows: 30,
+      });
       setServers((curr) =>
         curr.map((s) =>
           s.server_id === server.server_id
@@ -90,6 +100,12 @@ export default function App() {
 
       const res = await cli<{ server_id: string; stopped: boolean }>("stop_server", server.server_id);
       const stopped = !!res?.data?.stopped;
+
+      try {
+        await invoke("pty_stop", { ptyId: server.server_id });
+      } catch {
+        // PTY may already be gone
+      }
       setServers((curr) =>
         curr.map((s) =>
           s.server_id === server.server_id

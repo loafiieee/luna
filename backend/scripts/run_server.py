@@ -1363,9 +1363,26 @@ def run_server(edition: str, platform: str, version: str, name: str):
         )
 
         # ---- Monitor: stop tunnel when server exits or java TCP port closes ----
+        detached_server_detected = False
         while True:
             code = proc.poll()
             if code is not None:
+                # Some launch scripts (notably certain forge/neoforge run scripts) can
+                # spawn the real JVM process and then exit immediately. In that case the
+                # wrapper process is gone but the server is still online.
+                if edition in ("java", "both") and is_tcp_open("127.0.0.1", int(java_port)):
+                    if not detached_server_detected:
+                        detached_server_detected = True
+                        state["server_pid"] = None
+                        state["detached_process"] = True
+                        state["state"] = "running"
+                        recorder.write_state(state)
+                        warn(
+                            "[runtime] launcher process exited but server port is still open; "
+                            "keeping state as running (detached server process detected)."
+                        )
+                    time.sleep(1.0)
+                    continue
                 break
 
             if tunnel_started and tcp_ready_once and edition in ("java", "both"):

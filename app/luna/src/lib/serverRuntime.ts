@@ -11,12 +11,12 @@ const PLAYER_LIST_KEYS = [
 ];
 
 export function isServerOnline(server: ServerInfo): boolean {
-  if (typeof server.running === "boolean") return server.running;
-
   const rt: any = server.runtime ?? {};
   const state = String(rt.state ?? rt.status ?? "").toLowerCase();
   if (["running", "starting", "online", "up"].includes(state)) return true;
   if (["stopped", "stopping", "offline", "down", "error", "crashed"].includes(state)) return false;
+
+  if (typeof server.running === "boolean") return server.running;
 
   return typeof server.pid === "number" && server.pid > 0;
 }

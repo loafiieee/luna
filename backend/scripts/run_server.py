@@ -203,28 +203,57 @@ def _pid_listening_on_tcp_port(port: int) -> int:
                     except Exception:
                         continue
         else:
-            out = subprocess.check_output(["ss", "-ltnp"], text=True, errors="ignore")
-            needle = f":{p}"
-            for line in out.splitlines():
-                if needle not in line:
-                    continue
-                if "LISTEN" not in line.upper():
-                    continue
-                marker = "pid="
-                idx = line.find(marker)
-                if idx == -1:
-                    continue
-                tail = line[idx + len(marker) :]
-                pid_digits = ""
-                for ch in tail:
-                    if ch.isdigit():
-                        pid_digits += ch
-                    else:
-                        break
-                if pid_digits:
-                    pid = int(pid_digits)
+            # Try ss first
+            try:
+                out = subprocess.check_output(["ss", "-ltnp"], text=True, errors="ignore")
+                needle = f":{p}"
+                for line in out.splitlines():
+                    if needle not in line:
+                        continue
+                    if "LISTEN" not in line.upper():
+                        continue
+                    marker = "pid="
+                    idx = line.find(marker)
+                    if idx == -1:
+                        continue
+                    tail = line[idx + len(marker) :]
+                    pid_digits = ""
+                    for ch in tail:
+                        if ch.isdigit():
+                            pid_digits += ch
+                        else:
+                            break
+                    if pid_digits:
+                        pid = int(pid_digits)
+                        if pid > 0:
+                            return pid
+            except Exception:
+                pass
+
+            # Fallback to lsof when ss is unavailable
+            try:
+                out = subprocess.check_output(["lsof", "-nP", f"-iTCP:{p}", "-sTCP:LISTEN", "-t"], text=True, errors="ignore")
+                for line in out.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    pid = int(line)
                     if pid > 0:
                         return pid
+            except Exception:
+                pass
+
+            # Last fallback to fuser
+            try:
+                out = subprocess.check_output(["fuser", "-n", "tcp", str(p)], text=True, errors="ignore")
+                for tok in out.replace("\n", " ").split():
+                    tok = tok.strip().strip(":")
+                    if tok.isdigit():
+                        pid = int(tok)
+                        if pid > 0:
+                            return pid
+            except Exception:
+                pass
     except Exception:
         return 0
 
@@ -1088,12 +1117,20 @@ def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
 
     end = time.time() + timeout_s
     while time.time() < end:
+        # Detached launchers may not expose a stable PID in state, so keep re-resolving.
+        if not pid and detached and java_port > 0:
+            pid = _pid_listening_on_tcp_port(java_port)
         if pid and not _pid_exists(pid):
+            return True
+        if detached and java_port > 0 and not is_tcp_open("127.0.0.1", java_port):
             return True
         # if manager died, we still may need to kill pid
         time.sleep(0.25)
 
     # Fallback: kill server pid
+    if not pid and detached and java_port > 0:
+        pid = _pid_listening_on_tcp_port(java_port)
+
     if pid:
         _terminate_pid(pid, timeout_s=8.0)
 

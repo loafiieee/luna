@@ -51,7 +51,7 @@ export default function App() {
     addLog("info", `Start requested for "${server.name}".`);
     setActionServerId(server.server_id);
     try {
-      await cli<{ server_id: string; status: string }>("start_server", server.server_id);
+      await cli<{ server_id: string; status: string }>("start_server", server.edition, server.platform, server.version, server.name);
       setServers((curr) =>
         curr.map((s) =>
           s.server_id === server.server_id

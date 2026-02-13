@@ -506,8 +506,8 @@ function DetailsPane({ server }: { server: ServerInfo }) {
     return () => window.clearInterval(id);
   }, [isOnline]);
 
-  const cpuPercent = pickNumber(rt, ["cpu_percent", "cpu_usage", "cpu", "process_cpu_percent"]);
-  const ramMb = pickNumber(rt, ["ram_mb", "ram_usage_mb", "memory_mb", "rss_mb", "memory"]);
+  const cpuPercent = pickCpuPercent(rt);
+  const ramMb = pickRamMb(rt);
 
   const startedAtSec = typeof rt.started_at === "number" ? rt.started_at : null;
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
@@ -543,17 +543,62 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   );
 }
 
-function pickNumber(source: any, keys: string[]): number | null {
-  for (const key of keys) {
-    const value = source?.[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-    if (typeof value === "string") {
-      const parsed = Number(value);
+function parseLooseNumber(value: any): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const cleaned = value.trim().replace(/,/g, "");
+    const direct = Number(cleaned);
+    if (Number.isFinite(direct)) return direct;
+
+    const match = cleaned.match(/-?\d+(?:\.\d+)?/);
+    if (match) {
+      const parsed = Number(match[0]);
       if (Number.isFinite(parsed)) return parsed;
     }
   }
+  return null;
+}
+
+function pickCpuPercent(rt: any): number | null {
+  const candidates = [
+    rt?.cpu_percent,
+    rt?.cpu_usage,
+    rt?.cpu,
+    rt?.process_cpu_percent,
+    rt?.metrics?.cpu_percent,
+    rt?.metrics?.cpu,
+    rt?.performance?.cpu_percent,
+  ];
+
+  for (const value of candidates) {
+    const parsed = parseLooseNumber(value);
+    if (parsed == null) continue;
+    return Math.max(0, Math.min(100, parsed));
+  }
+  return null;
+}
+
+function pickRamMb(rt: any): number | null {
+  const directMbCandidates = [
+    rt?.ram_mb,
+    rt?.ram_usage_mb,
+    rt?.memory_mb,
+    rt?.rss_mb,
+    rt?.metrics?.ram_mb,
+    rt?.metrics?.memory_mb,
+  ];
+
+  for (const value of directMbCandidates) {
+    const parsed = parseLooseNumber(value);
+    if (parsed != null && parsed >= 0) return parsed;
+  }
+
+  const bytesCandidates = [rt?.memory_bytes, rt?.rss_bytes, rt?.metrics?.memory_bytes];
+  for (const value of bytesCandidates) {
+    const parsed = parseLooseNumber(value);
+    if (parsed != null && parsed >= 0) return parsed / (1024 * 1024);
+  }
+
   return null;
 }
 

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
@@ -192,6 +193,69 @@ def _can_bind_udp(port: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _pid_cmd_name(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    try:
+        if os.name == "nt":
+            out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], text=True, errors="ignore")
+            row = out.strip()
+            if not row or row.startswith("INFO:"):
+                return ""
+            parts = [p.strip().strip('"') for p in row.split(",")]
+            return (parts[0] if parts else "").lower()
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "comm="], text=True, errors="ignore")
+        return out.strip().lower()
+    except Exception:
+        return ""
+
+
+def _pid_cmdline(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    try:
+        if os.name == "nt":
+            return _pid_cmd_name(pid)
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "args="], text=True, errors="ignore")
+        return out.strip().lower()
+    except Exception:
+        return ""
+
+
+def _find_java_descendant_pid(root_pid: int) -> int:
+    if root_pid <= 0 or os.name == "nt":
+        return 0
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid=,ppid="], text=True, errors="ignore")
+        children: Dict[int, List[int]] = {}
+        for ln in out.splitlines():
+            parts = ln.strip().split()
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+            except Exception:
+                continue
+            children.setdefault(ppid, []).append(pid)
+
+        queue = list(children.get(root_pid, []))
+        seen: set[int] = set()
+        while queue:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            cmd = _pid_cmd_name(cur)
+            cmdline = _pid_cmdline(cur)
+            if "java" in cmd or " java " in f" {cmdline} ":
+                return cur
+            queue.extend(children.get(cur, []))
+    except Exception:
+        return 0
+    return 0
 
 
 def _pid_listening_on_tcp_port(port: int) -> int:
@@ -1041,10 +1105,27 @@ def _sample_process_metrics(pid: int) -> Tuple[Optional[float], Optional[float]]
 
 def _resolve_metrics_pid(state: Dict[str, Any]) -> int:
     pid = int(state.get("server_pid") or 0)
+    java_port = int(state.get("java_port") or 0)
+
+    # Prefer whichever process is actually bound to the Minecraft TCP port.
+    # This avoids sampling a lightweight launcher shell (e.g. run.sh) instead
+    # of the Java process, which would produce misleading CPU/RAM metrics.
+    if java_port > 0:
+        p = _pid_listening_on_tcp_port(java_port)
+        if p > 0:
+            return p
+
     if pid > 0 and _pid_exists(pid):
+        cmd = _pid_cmd_name(pid)
+        # Forge/NeoForge often run via shell wrappers; try to find child java process.
+        if cmd and "java" not in cmd:
+            child_java = _find_java_descendant_pid(pid)
+            if child_java > 0:
+                return child_java
         return pid
-    if bool(state.get("detached_process")) and int(state.get("java_port") or 0) > 0:
-        p = _pid_listening_on_tcp_port(int(state.get("java_port") or 0))
+
+    if bool(state.get("detached_process")) and java_port > 0:
+        p = _pid_listening_on_tcp_port(java_port)
         if p > 0:
             return p
     return 0
@@ -1094,6 +1175,31 @@ def _make_popen_kwargs() -> dict:
 
 
 def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRecorder, state: Dict[str, Any], stop_evt: threading.Event) -> None:
+    ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+    def _strip_ansi(text: str) -> str:
+        return ansi_escape.sub("", text)
+
+    def _current_players() -> set[str]:
+        raw = state.get("players_list")
+        if not isinstance(raw, list):
+            return set()
+        out: set[str] = set()
+        for item in raw:
+            if isinstance(item, str):
+                out.add(item)
+            elif isinstance(item, dict) and isinstance(item.get("name"), str):
+                out.add(item["name"])
+        return out
+
+    def _write_players(players: set[str]) -> None:
+        ordered = sorted(players, key=lambda n: n.lower())
+        state["players_list"] = [
+            {"name": n, "head_url": f"https://mc-heads.net/avatar/{urllib.parse.quote(n)}/32"}
+            for n in ordered
+        ]
+        state["players_online"] = len(ordered)
+
     try:
         if proc.stdout is None:
             return
@@ -1110,15 +1216,76 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
             # Persist for reattach
             recorder.write_console(clean)
 
+            text = _strip_ansi(clean)
+
             # Parse player count from common Minecraft log lines.
-            m = re.search(r"There are\s+(\d+)\s+of a max(?:imum)? of\s+(\d+)\s+players online", clean, flags=re.IGNORECASE)
+            m = re.search(r"There are\s+(\d+)\s+of a max(?:imum)? of\s+(\d+)\s+players online", text, flags=re.IGNORECASE)
             if m:
                 try:
                     state["players_online"] = int(m.group(1))
                     state["max_players"] = int(m.group(2))
+
+                    names_match = re.search(r"players online:\s*(.+)$", text, flags=re.IGNORECASE)
+                    if names_match:
+                        names = {
+                            n.strip()
+                            for n in names_match.group(1).split(",")
+                            if n.strip() and n.strip() != "(none)"
+                        }
+                        _write_players(names)
+
                     recorder.write_state(state)
                 except Exception:
                     pass
+
+            joined = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+joined the game", text)
+            if joined:
+                players = _current_players()
+                players.add(joined.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            left = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+left the game", text)
+            if left:
+                players = _current_players()
+                players.discard(left.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            # Additional log formats used by Paper/Spigot variants.
+            logged_in = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\[/[^\]]+\]\s+logged in with entity id", text)
+            if logged_in:
+                players = _current_players()
+                players.add(logged_in.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            lost_conn = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+lost connection:", text)
+            if lost_conn:
+                players = _current_players()
+                players.discard(lost_conn.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            bedrock_joined = re.search(r"Player connected:\s*([^,\s]+),\s*xuid:", text, flags=re.IGNORECASE)
+            if bedrock_joined:
+                players = _current_players()
+                players.add(bedrock_joined.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            bedrock_left = re.search(r"Player disconnected:\s*([^,\s]+),\s*xuid:", text, flags=re.IGNORECASE)
+            if bedrock_left:
+                players = _current_players()
+                players.discard(bedrock_left.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
     except Exception as e:
         warn(f"[server:{server_id}] output pump error: {e}")
 

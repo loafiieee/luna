@@ -105,9 +105,19 @@ export function playersList(server: ServerInfo): Array<{ name: string; head_url?
 
   return raw
     .map((p: any) => {
-      if (typeof p === "string") return { name: p };
-      if (p && typeof p.name === "string") return { name: p.name, head_url: p.head_url };
-      if (p && typeof p.username === "string") return { name: p.username, head_url: p.head_url };
+      if (typeof p === "string") return { name: p, head_url: `https://mc-heads.net/avatar/${encodeURIComponent(p)}/32` };
+      if (p && typeof p.name === "string") {
+        return {
+          name: p.name,
+          head_url: typeof p.head_url === "string" ? p.head_url : `https://mc-heads.net/avatar/${encodeURIComponent(p.name)}/32`,
+        };
+      }
+      if (p && typeof p.username === "string") {
+        return {
+          name: p.username,
+          head_url: typeof p.head_url === "string" ? p.head_url : `https://mc-heads.net/avatar/${encodeURIComponent(p.username)}/32`,
+        };
+      }
       return null;
     })
     .filter(Boolean) as Array<{ name: string; head_url?: string }>;

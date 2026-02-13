@@ -507,7 +507,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   }, [isOnline]);
 
   const cpuPercent = pickNumber(rt, ["cpu_percent", "cpu_usage", "cpu", "process_cpu_percent"]);
-  const ramMb = pickNumber(rt, ["ram_mb", "ram_usage_mb", "memory_mb", "rss_mb", "memory"]);
+  const ramMb = pickRamMb(rt);
 
   const startedAtSec = typeof rt.started_at === "number" ? rt.started_at : null;
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
@@ -555,6 +555,22 @@ function pickNumber(source: any, keys: string[]): number | null {
     }
   }
   return null;
+}
+
+function pickRamMb(source: any): number | null {
+  const mb = pickNumber(source, ["ram_mb", "ram_usage_mb", "memory_mb", "rss_mb"]);
+  if (mb != null) return mb;
+
+  const bytes = pickNumber(source, ["ram_bytes", "memory_bytes", "rss_bytes"]);
+  if (bytes != null && bytes >= 0) return bytes / (1024 * 1024);
+
+  const memory = pickNumber(source, ["memory"]);
+  if (memory == null || memory < 0) return null;
+
+  // Some runtimes report `memory` as GiB (e.g., 1 => ~1024MB), others as MB.
+  if (memory > 0 && memory <= 64) return memory * 1024;
+
+  return memory;
 }
 
 function buildPerfSamples(rt: any): number[] {

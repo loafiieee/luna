@@ -24,6 +24,7 @@ export default function App() {
   const [actionServerId, setActionServerId] = useState<string | null>(null);
   const startInFlightRef = useRef<Set<string>>(new Set());
   const [pendingStarts, setPendingStarts] = useState<Record<string, number>>({});
+  const [pendingStops, setPendingStops] = useState<Record<string, number>>({});
 
   function publicAddressFor(server: ServerInfo): string {
     const rt: any = server.runtime ?? {};
@@ -49,6 +50,12 @@ export default function App() {
   }
 
   function uiServerOnline(server: ServerInfo): boolean {
+    if (pendingStops[server.server_id]) return false;
+
+    const rt: any = server.runtime ?? {};
+    const state = String(rt.state ?? rt.status ?? "").toLowerCase();
+    if (state === "stopping") return true;
+
     return isServerOnline(server) || !!pendingStarts[server.server_id];
   }
 
@@ -68,6 +75,11 @@ export default function App() {
     addLog("info", `Start requested for "${server.name}".`);
     startInFlightRef.current.add(sid);
     setActionServerId(sid);
+    setPendingStops((curr) => {
+      const next = { ...curr };
+      delete next[sid];
+      return next;
+    });
     setPendingStarts((curr) => ({ ...curr, [sid]: Date.now() }));
 
     // Show immediate progress so PTY bootstrapping doesn't look like a dead click.
@@ -147,33 +159,55 @@ export default function App() {
   }
 
   async function stopServer(server: ServerInfo) {
+    const sid = server.server_id;
+
+    if (actionServerId === sid || pendingStops[sid]) {
+      return;
+    }
+
     setErr(null);
     addLog("info", `Stop requested for "${server.name}".`);
+    setPendingStops((curr) => ({ ...curr, [sid]: Date.now() }));
     setPendingStarts((curr) => {
       const next = { ...curr };
-      delete next[server.server_id];
+      delete next[sid];
       return next;
     });
-    setActionServerId(server.server_id);
+    setActionServerId(sid);
     try {
+      setServers((curr) =>
+        curr.map((s) =>
+          s.server_id === sid
+            ? {
+                ...s,
+                running: true,
+                runtime: {
+                  ...(s.runtime ?? {}),
+                  state: "stopping",
+                },
+              }
+            : s,
+        ),
+      );
+
       try {
-        await invoke("send_server_console_command", { serverId: server.server_id, command: "stop" });
+        await invoke("send_server_console_command", { serverId: sid, command: "stop" });
         addLog("info", `Sent console stop command to "${server.name}".`);
       } catch (e: any) {
         addLog("warn", `Could not send console stop command for "${server.name}": ${String(e)}`);
       }
 
-      const res = await cli<{ server_id: string; stopped: boolean }>("stop_server", server.server_id);
+      const res = await cli<{ server_id: string; stopped: boolean }>("stop_server", sid);
       const stopped = !!res?.data?.stopped;
 
       try {
-        await invoke("pty_stop", { ptyId: server.server_id });
+        await invoke("pty_stop", { ptyId: sid });
       } catch {
         // PTY may already be gone
       }
       setServers((curr) =>
         curr.map((s) =>
-          s.server_id === server.server_id
+          s.server_id === sid
             ? {
                 ...s,
                 running: stopped ? false : s.running,
@@ -185,14 +219,27 @@ export default function App() {
             : s,
         ),
       );
+      if (stopped) {
+        setPendingStops((curr) => {
+          const next = { ...curr };
+          delete next[sid];
+          return next;
+        });
+      }
       addLog(stopped ? "ok" : "warn", stopped ? `Stopped "${server.name}".` : `Stop requested for "${server.name}" but server may still be shutting down.`);
       void refresh({ silent: true });
     } catch (e: any) {
       const msg = String(e);
       setErr(msg);
       addLog("err", `Stop failed: ${msg}`);
+
+      setPendingStops((curr) => {
+        const next = { ...curr };
+        delete next[sid];
+        return next;
+      });
     } finally {
-      setActionServerId((curr) => (curr === server.server_id ? null : curr));
+      setActionServerId((curr) => (curr === sid ? null : curr));
     }
   }
 
@@ -291,6 +338,44 @@ export default function App() {
     return () => window.clearInterval(intervalId);
   }, [addLog, pendingStarts, setServers, sortedServers]);
 
+  useEffect(() => {
+    const pendingIds = Object.keys(pendingStops);
+    if (pendingIds.length === 0) return;
+
+    const intervalId = window.setInterval(() => {
+      const serverById = new Map(sortedServers.map((s) => [s.server_id, s]));
+      const clearIds: string[] = [];
+
+      for (const sid of pendingIds) {
+        const server = serverById.get(sid);
+        const state = String((server?.runtime as any)?.state ?? "").toLowerCase();
+        const ageMs = Date.now() - (pendingStops[sid] ?? Date.now());
+
+        if (["stopped", "offline", "down", "error", "crashed"].includes(state)) {
+          clearIds.push(sid);
+          continue;
+        }
+
+        if (ageMs > 15000) {
+          clearIds.push(sid);
+          if (server && state !== "stopped") {
+            addLog("warn", `Stop for "${server.name}" is taking longer than expected.`);
+          }
+        }
+      }
+
+      if (clearIds.length > 0) {
+        setPendingStops((curr) => {
+          const next = { ...curr };
+          for (const sid of clearIds) delete next[sid];
+          return next;
+        });
+      }
+    }, 800);
+
+    return () => window.clearInterval(intervalId);
+  }, [addLog, pendingStops, sortedServers]);
+
   const selectedServer = useMemo(() => {
     if (!selected) return null;
     return sortedServers.find((s) => s.server_id === selected.server_id) ?? selected;
@@ -331,7 +416,7 @@ export default function App() {
         )}
       </div>
     );
-  }, [actionServerId, sortedServers, loading, pendingStarts, refresh]);
+  }, [actionServerId, sortedServers, loading, pendingStarts, pendingStops, refresh]);
 
   return (
     <div style={styles.app}>

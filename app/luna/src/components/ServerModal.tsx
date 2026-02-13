@@ -369,7 +369,28 @@ function ConsolePane({
   useEffect(() => {
     offsetRef.current = 0;
     setPollErr(null);
+    terminalRef.current?.clear();
   }, [server.server_id]);
+
+  useEffect(() => {
+    if (isOnline) return;
+
+    terminalRef.current?.clear();
+    setCommand("");
+
+    void (async () => {
+      try {
+        const res = await invoke<{ lines: string[]; offset: number }>("read_server_console", {
+          serverId: server.server_id,
+          offset: 0,
+          maxLines: 0,
+        });
+        offsetRef.current = res.offset;
+      } catch {
+        // ignore
+      }
+    })();
+  }, [isOnline, server.server_id]);
 
   useEffect(() => {
     const term = new Terminal({
@@ -458,7 +479,7 @@ function ConsolePane({
     <div>
       <div style={styles.paneTitle}>Console</div>
       <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
-      {!isOnline && actionBusy && <div style={{ marginTop: 8, opacity: 0.8 }}>Waiting for server to start…</div>}
+      {!isOnline && <div style={{ marginTop: 8, opacity: 0.8 }}>Waiting for server start…</div>}
 
       <div style={styles.consoleView} ref={containerRef} />
 

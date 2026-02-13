@@ -10,15 +10,67 @@ const PLAYER_LIST_KEYS = [
   "player_list",
 ];
 
+function parseNonNegativeNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
+function normalizePlayerEntry(p: any): { name: string; head_url?: string } | null {
+  if (typeof p === "string") return { name: p, head_url: `https://mc-heads.net/avatar/${encodeURIComponent(p)}/32` };
+  if (p && typeof p.name === "string") {
+    return {
+      name: p.name,
+      head_url: typeof p.head_url === "string" ? p.head_url : `https://mc-heads.net/avatar/${encodeURIComponent(p.name)}/32`,
+    };
+  }
+  if (p && typeof p.username === "string") {
+    return {
+      name: p.username,
+      head_url: typeof p.head_url === "string" ? p.head_url : `https://mc-heads.net/avatar/${encodeURIComponent(p.username)}/32`,
+    };
+  }
+  return null;
+}
+
+
+function hasLiveRuntimeSignal(rt: any): boolean {
+  const numericSignals = [
+    rt?.players_online,
+    rt?.online_players,
+    rt?.playersOnline,
+    rt?.player_count,
+    rt?.current_players,
+    rt?.num_players,
+    rt?.cpu_percent,
+    rt?.cpu_usage,
+    rt?.ram_mb,
+    rt?.memory_mb,
+  ];
+
+  for (const value of numericSignals) {
+    const parsed = parseNonNegativeNumber(value);
+    if (parsed != null) return true;
+  }
+
+  const playerSample = rt?.players_list ?? rt?.online_players_list ?? rt?.players?.sample ?? rt?.query?.players;
+  return Array.isArray(playerSample) && playerSample.length > 0;
+}
+
 export function isServerOnline(server: ServerInfo): boolean {
   const rt: any = server.runtime ?? {};
   const state = String(rt.state ?? rt.status ?? "").toLowerCase();
-  if (["running", "starting", "online", "up"].includes(state)) return true;
-  if (["stopped", "stopping", "offline", "down", "error", "crashed"].includes(state)) return false;
+  if (["running", "starting", "online", "up", "started", "alive", "ready"].includes(state)) return true;
+  if (["stopped", "stopping", "offline", "down", "error", "crashed", "dead", "exited"].includes(state)) return false;
 
   if (typeof server.running === "boolean") return server.running;
 
-  return typeof server.pid === "number" && server.pid > 0;
+  if (typeof server.pid === "number" && server.pid > 0) return true;
+
+  return hasLiveRuntimeSignal(rt);
 }
 
 export function serverIconUrl(server: ServerInfo): string | null {
@@ -46,15 +98,8 @@ export function playersOnline(server: ServerInfo): number | null {
   ];
 
   for (const value of numericCandidates) {
-    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-      return value;
-    }
-    if (typeof value === "string") {
-      const parsed = Number(value);
-      if (Number.isFinite(parsed) && parsed >= 0) {
-        return parsed;
-      }
-    }
+    const parsed = parseNonNegativeNumber(value);
+    if (parsed != null) return parsed;
   }
 
   const list = playersList(server);
@@ -99,26 +144,23 @@ export function maxPlayersFor(server: ServerInfo): string {
 
 export function playersList(server: ServerInfo): Array<{ name: string; head_url?: string }> {
   const rt: any = server.runtime ?? {};
-  const raw = PLAYER_LIST_KEYS.map((k) => rt[k]).find((value) => Array.isArray(value));
+  const raw = PLAYER_LIST_KEYS.map((k) => rt[k]).find((value) => Array.isArray(value))
+    ?? rt?.players?.sample
+    ?? rt?.status?.players?.sample
+    ?? rt?.query?.players;
+
+  if (typeof raw === "string") {
+    return raw
+      .split(",")
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0)
+      .map((v) => normalizePlayerEntry(v))
+      .filter(Boolean) as Array<{ name: string; head_url?: string }>;
+  }
 
   if (!Array.isArray(raw)) return [];
 
   return raw
-    .map((p: any) => {
-      if (typeof p === "string") return { name: p, head_url: `https://mc-heads.net/avatar/${encodeURIComponent(p)}/32` };
-      if (p && typeof p.name === "string") {
-        return {
-          name: p.name,
-          head_url: typeof p.head_url === "string" ? p.head_url : `https://mc-heads.net/avatar/${encodeURIComponent(p.name)}/32`,
-        };
-      }
-      if (p && typeof p.username === "string") {
-        return {
-          name: p.username,
-          head_url: typeof p.head_url === "string" ? p.head_url : `https://mc-heads.net/avatar/${encodeURIComponent(p.username)}/32`,
-        };
-      }
-      return null;
-    })
+    .map((p: any) => normalizePlayerEntry(p))
     .filter(Boolean) as Array<{ name: string; head_url?: string }>;
 }

@@ -195,6 +195,69 @@ def _can_bind_udp(port: int) -> bool:
         return False
 
 
+def _pid_cmd_name(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    try:
+        if os.name == "nt":
+            out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], text=True, errors="ignore")
+            row = out.strip()
+            if not row or row.startswith("INFO:"):
+                return ""
+            parts = [p.strip().strip('"') for p in row.split(",")]
+            return (parts[0] if parts else "").lower()
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "comm="], text=True, errors="ignore")
+        return out.strip().lower()
+    except Exception:
+        return ""
+
+
+def _pid_cmdline(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    try:
+        if os.name == "nt":
+            return _pid_cmd_name(pid)
+        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "args="], text=True, errors="ignore")
+        return out.strip().lower()
+    except Exception:
+        return ""
+
+
+def _find_java_descendant_pid(root_pid: int) -> int:
+    if root_pid <= 0 or os.name == "nt":
+        return 0
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid=,ppid="], text=True, errors="ignore")
+        children: Dict[int, List[int]] = {}
+        for ln in out.splitlines():
+            parts = ln.strip().split()
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+            except Exception:
+                continue
+            children.setdefault(ppid, []).append(pid)
+
+        queue = list(children.get(root_pid, []))
+        seen: set[int] = set()
+        while queue:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            cmd = _pid_cmd_name(cur)
+            cmdline = _pid_cmdline(cur)
+            if "java" in cmd or " java " in f" {cmdline} ":
+                return cur
+            queue.extend(children.get(cur, []))
+    except Exception:
+        return 0
+    return 0
+
+
 def _pid_listening_on_tcp_port(port: int) -> int:
     """Best-effort PID lookup for a listening TCP port."""
     try:
@@ -1053,6 +1116,12 @@ def _resolve_metrics_pid(state: Dict[str, Any]) -> int:
             return p
 
     if pid > 0 and _pid_exists(pid):
+        cmd = _pid_cmd_name(pid)
+        # Forge/NeoForge often run via shell wrappers; try to find child java process.
+        if cmd and "java" not in cmd:
+            child_java = _find_java_descendant_pid(pid)
+            if child_java > 0:
+                return child_java
         return pid
 
     if bool(state.get("detached_process")) and java_port > 0:

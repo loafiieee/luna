@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
@@ -1105,6 +1106,11 @@ def _make_popen_kwargs() -> dict:
 
 
 def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRecorder, state: Dict[str, Any], stop_evt: threading.Event) -> None:
+    ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+    def _strip_ansi(text: str) -> str:
+        return ansi_escape.sub("", text)
+
     def _current_players() -> set[str]:
         raw = state.get("players_list")
         if not isinstance(raw, list):
@@ -1120,7 +1126,7 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
     def _write_players(players: set[str]) -> None:
         ordered = sorted(players, key=lambda n: n.lower())
         state["players_list"] = [
-            {"name": n, "head_url": f"https://mc-heads.net/avatar/{n}/32"}
+            {"name": n, "head_url": f"https://mc-heads.net/avatar/{urllib.parse.quote(n)}/32"}
             for n in ordered
         ]
         state["players_online"] = len(ordered)
@@ -1141,14 +1147,16 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
             # Persist for reattach
             recorder.write_console(clean)
 
+            text = _strip_ansi(clean)
+
             # Parse player count from common Minecraft log lines.
-            m = re.search(r"There are\s+(\d+)\s+of a max(?:imum)? of\s+(\d+)\s+players online", clean, flags=re.IGNORECASE)
+            m = re.search(r"There are\s+(\d+)\s+of a max(?:imum)? of\s+(\d+)\s+players online", text, flags=re.IGNORECASE)
             if m:
                 try:
                     state["players_online"] = int(m.group(1))
                     state["max_players"] = int(m.group(2))
 
-                    names_match = re.search(r"players online:\s*(.+)$", clean, flags=re.IGNORECASE)
+                    names_match = re.search(r"players online:\s*(.+)$", text, flags=re.IGNORECASE)
                     if names_match:
                         names = {
                             n.strip()
@@ -1161,7 +1169,7 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
                 except Exception:
                     pass
 
-            joined = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+joined the game", clean)
+            joined = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+joined the game", text)
             if joined:
                 players = _current_players()
                 players.add(joined.group(1))
@@ -1169,10 +1177,27 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
                 recorder.write_state(state)
                 continue
 
-            left = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+left the game", clean)
+            left = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+left the game", text)
             if left:
                 players = _current_players()
                 players.discard(left.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            # Additional log formats used by Paper/Spigot variants.
+            logged_in = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\[/[^\]]+\]\s+logged in with entity id", text)
+            if logged_in:
+                players = _current_players()
+                players.add(logged_in.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            lost_conn = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+lost connection:", text)
+            if lost_conn:
+                players = _current_players()
+                players.discard(lost_conn.group(1))
                 _write_players(players)
                 recorder.write_state(state)
                 continue

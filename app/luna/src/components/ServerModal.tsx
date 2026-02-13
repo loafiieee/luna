@@ -258,7 +258,11 @@ export function ServerModal({
             {!isOnline ? (
               <div style={styles.playersEmpty}>Server is offline.</div>
             ) : filteredPlayers.length === 0 ? (
-              <div style={styles.playersEmpty}>No players found.</div>
+              typeof onlinePlayers === "number" && onlinePlayers > 0 ? (
+                <div style={styles.playersEmpty}>{onlinePlayers} player(s) online (runtime did not provide names).</div>
+              ) : (
+                <div style={styles.playersEmpty}>No players found.</div>
+              )
             ) : (
               filteredPlayers.map((p) => <PlayerRow key={p.name} name={p.name} headUrl={p.head_url} />)
             )}
@@ -559,6 +563,25 @@ function parseLooseNumber(value: any): number | null {
   return null;
 }
 
+function parseMemoryToMb(value: any): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value !== "string") return null;
+
+  const text = value.trim().toLowerCase().replace(/,/g, "");
+  const m = text.match(/(-?\d+(?:\.\d+)?)\s*(b|bytes?|kb|kib|mb|mib|gb|gib|tb|tib)?/i);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 0) return null;
+  const unit = (m[2] || "mb").toLowerCase();
+
+  if (unit === "b" || unit === "byte" || unit === "bytes") return n / (1024 * 1024);
+  if (unit === "kb" || unit === "kib") return n / 1024;
+  if (unit === "mb" || unit === "mib") return n;
+  if (unit === "gb" || unit === "gib") return n * 1024;
+  if (unit === "tb" || unit === "tib") return n * 1024 * 1024;
+  return null;
+}
+
 function pickCpuPercent(rt: any): number | null {
   const candidates = [
     rt?.cpu_percent,
@@ -568,6 +591,8 @@ function pickCpuPercent(rt: any): number | null {
     rt?.metrics?.cpu_percent,
     rt?.metrics?.cpu,
     rt?.performance?.cpu_percent,
+    rt?.performance?.cpu,
+    rt?.stats?.cpu,
   ];
 
   for (const value of candidates) {
@@ -575,6 +600,13 @@ function pickCpuPercent(rt: any): number | null {
     if (parsed == null) continue;
     return Math.max(0, Math.min(100, parsed));
   }
+
+  const hist = [rt?.cpu_history, rt?.metrics?.cpu, rt?.performance?.cpu, rt?.history?.cpu].find((x) => Array.isArray(x));
+  if (Array.isArray(hist) && hist.length > 0) {
+    const last = [...hist].reverse().find((n: any) => typeof n === "number" && Number.isFinite(n));
+    if (typeof last === "number") return Math.max(0, Math.min(100, last));
+  }
+
   return null;
 }
 
@@ -586,17 +618,31 @@ function pickRamMb(rt: any): number | null {
     rt?.rss_mb,
     rt?.metrics?.ram_mb,
     rt?.metrics?.memory_mb,
+    rt?.stats?.memory_mb,
   ];
 
   for (const value of directMbCandidates) {
-    const parsed = parseLooseNumber(value);
-    if (parsed != null && parsed >= 0) return parsed;
+    const parsed = parseMemoryToMb(value);
+    if (parsed != null && parsed >= 16) return parsed;
+    if (parsed != null && parsed >= 0 && parsed < 16 && !rt?.state) return parsed;
   }
 
-  const bytesCandidates = [rt?.memory_bytes, rt?.rss_bytes, rt?.metrics?.memory_bytes];
+  const bytesCandidates = [rt?.memory_bytes, rt?.rss_bytes, rt?.metrics?.memory_bytes, rt?.metrics?.rss_bytes];
   for (const value of bytesCandidates) {
     const parsed = parseLooseNumber(value);
-    if (parsed != null && parsed >= 0) return parsed / (1024 * 1024);
+    if (parsed == null || parsed < 0) continue;
+
+    const asMb = parsed / (1024 * 1024);
+    const asKbToMb = parsed / 1024;
+
+    if (asMb >= 16) return asMb;
+    if (asKbToMb >= 16) return asKbToMb;
+  }
+
+  const stringCandidates = [rt?.memory, rt?.mem, rt?.rss, rt?.metrics?.memory, rt?.stats?.memory];
+  for (const value of stringCandidates) {
+    const parsed = parseMemoryToMb(value);
+    if (parsed != null && parsed >= 16) return parsed;
   }
 
   return null;

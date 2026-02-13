@@ -36,6 +36,30 @@ function normalizePlayerEntry(p: any): { name: string; head_url?: string } | nul
   return null;
 }
 
+
+function hasLiveRuntimeSignal(rt: any): boolean {
+  const numericSignals = [
+    rt?.players_online,
+    rt?.online_players,
+    rt?.playersOnline,
+    rt?.player_count,
+    rt?.current_players,
+    rt?.num_players,
+    rt?.cpu_percent,
+    rt?.cpu_usage,
+    rt?.ram_mb,
+    rt?.memory_mb,
+  ];
+
+  for (const value of numericSignals) {
+    const parsed = parseNonNegativeNumber(value);
+    if (parsed != null) return true;
+  }
+
+  const playerSample = rt?.players_list ?? rt?.online_players_list ?? rt?.players?.sample ?? rt?.query?.players;
+  return Array.isArray(playerSample) && playerSample.length > 0;
+}
+
 export function isServerOnline(server: ServerInfo): boolean {
   const rt: any = server.runtime ?? {};
   const state = String(rt.state ?? rt.status ?? "").toLowerCase();
@@ -44,7 +68,9 @@ export function isServerOnline(server: ServerInfo): boolean {
 
   if (typeof server.running === "boolean") return server.running;
 
-  return typeof server.pid === "number" && server.pid > 0;
+  if (typeof server.pid === "number" && server.pid > 0) return true;
+
+  return hasLiveRuntimeSignal(rt);
 }
 
 export function serverIconUrl(server: ServerInfo): string | null {

@@ -7,7 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
-import { isServerOnline } from "../lib/serverRuntime";
+import { isServerOnline, playersList } from "../lib/serverRuntime";
 
 export type ServerModalProps = {
   server: ServerInfo;
@@ -59,19 +59,7 @@ export function ServerModal({
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 
-  const players: Array<{ name: string; head_url?: string }> = useMemo(() => {
-    const rt = server.runtime ?? {};
-    const list = rt.players_list ?? rt.players ?? rt.online_players_list ?? rt.onlinePlayers ?? rt.online_players ?? [];
-    if (!Array.isArray(list)) return [];
-    return list
-      .map((p: any) => {
-        if (typeof p === "string") return { name: p };
-        if (p && typeof p.name === "string") return { name: p.name, head_url: p.head_url };
-        if (p && typeof p.username === "string") return { name: p.username, head_url: p.head_url };
-        return null;
-      })
-      .filter(Boolean) as Array<{ name: string; head_url?: string }>;
-  }, [server.runtime]);
+  const players: Array<{ name: string; head_url?: string }> = useMemo(() => playersList(server), [server]);
 
   const filteredPlayers = useMemo(() => {
     const q = playerSearch.trim().toLowerCase();
@@ -519,7 +507,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   }, [isOnline]);
 
   const cpuPercent = pickNumber(rt, ["cpu_percent", "cpu_usage", "cpu", "process_cpu_percent"]);
-  const ramMb = pickNumber(rt, ["ram_mb", "ram_usage_mb", "memory_mb", "rss_mb", "memory"]);
+  const ramMb = pickRamMb(rt);
 
   const startedAtSec = typeof rt.started_at === "number" ? rt.started_at : null;
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
@@ -561,8 +549,28 @@ function pickNumber(source: any, keys: string[]): number | null {
     if (typeof value === "number" && Number.isFinite(value)) {
       return value;
     }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
   }
   return null;
+}
+
+function pickRamMb(source: any): number | null {
+  const mb = pickNumber(source, ["ram_mb", "ram_usage_mb", "memory_mb", "rss_mb"]);
+  if (mb != null) return mb;
+
+  const bytes = pickNumber(source, ["ram_bytes", "memory_bytes", "rss_bytes"]);
+  if (bytes != null && bytes >= 0) return bytes / (1024 * 1024);
+
+  const memory = pickNumber(source, ["memory"]);
+  if (memory == null || memory < 0) return null;
+
+  // Some runtimes report `memory` as GiB (e.g., 1 => ~1024MB), others as MB.
+  if (memory > 0 && memory <= 64) return memory * 1024;
+
+  return memory;
 }
 
 function buildPerfSamples(rt: any): number[] {

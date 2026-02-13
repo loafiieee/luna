@@ -1270,22 +1270,6 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
                 _write_players(players)
                 recorder.write_state(state)
                 continue
-
-            bedrock_joined = re.search(r"Player connected:\s*([^,\s]+),\s*xuid:", text, flags=re.IGNORECASE)
-            if bedrock_joined:
-                players = _current_players()
-                players.add(bedrock_joined.group(1))
-                _write_players(players)
-                recorder.write_state(state)
-                continue
-
-            bedrock_left = re.search(r"Player disconnected:\s*([^,\s]+),\s*xuid:", text, flags=re.IGNORECASE)
-            if bedrock_left:
-                players = _current_players()
-                players.discard(bedrock_left.group(1))
-                _write_players(players)
-                recorder.write_state(state)
-                continue
     except Exception as e:
         warn(f"[server:{server_id}] output pump error: {e}")
 

@@ -7,7 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
-import { isServerOnline } from "../lib/serverRuntime";
+import { isServerOnline, playersList } from "../lib/serverRuntime";
 
 export type ServerModalProps = {
   server: ServerInfo;
@@ -59,19 +59,7 @@ export function ServerModal({
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 
-  const players: Array<{ name: string; head_url?: string }> = useMemo(() => {
-    const rt = server.runtime ?? {};
-    const list = rt.players_list ?? rt.players ?? rt.online_players_list ?? rt.onlinePlayers ?? rt.online_players ?? [];
-    if (!Array.isArray(list)) return [];
-    return list
-      .map((p: any) => {
-        if (typeof p === "string") return { name: p };
-        if (p && typeof p.name === "string") return { name: p.name, head_url: p.head_url };
-        if (p && typeof p.username === "string") return { name: p.username, head_url: p.head_url };
-        return null;
-      })
-      .filter(Boolean) as Array<{ name: string; head_url?: string }>;
-  }, [server.runtime]);
+  const players: Array<{ name: string; head_url?: string }> = useMemo(() => playersList(server), [server]);
 
   const filteredPlayers = useMemo(() => {
     const q = playerSearch.trim().toLowerCase();
@@ -560,6 +548,10 @@ function pickNumber(source: any, keys: string[]): number | null {
     const value = source?.[key];
     if (typeof value === "number" && Number.isFinite(value)) {
       return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
     }
   }
   return null;

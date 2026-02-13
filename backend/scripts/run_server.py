@@ -1041,10 +1041,21 @@ def _sample_process_metrics(pid: int) -> Tuple[Optional[float], Optional[float]]
 
 def _resolve_metrics_pid(state: Dict[str, Any]) -> int:
     pid = int(state.get("server_pid") or 0)
+    java_port = int(state.get("java_port") or 0)
+
+    # Prefer whichever process is actually bound to the Minecraft TCP port.
+    # This avoids sampling a lightweight launcher shell (e.g. run.sh) instead
+    # of the Java process, which would produce misleading CPU/RAM metrics.
+    if java_port > 0:
+        p = _pid_listening_on_tcp_port(java_port)
+        if p > 0:
+            return p
+
     if pid > 0 and _pid_exists(pid):
         return pid
-    if bool(state.get("detached_process")) and int(state.get("java_port") or 0) > 0:
-        p = _pid_listening_on_tcp_port(int(state.get("java_port") or 0))
+
+    if bool(state.get("detached_process")) and java_port > 0:
+        p = _pid_listening_on_tcp_port(java_port)
         if p > 0:
             return p
     return 0
@@ -1094,6 +1105,26 @@ def _make_popen_kwargs() -> dict:
 
 
 def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRecorder, state: Dict[str, Any], stop_evt: threading.Event) -> None:
+    def _current_players() -> set[str]:
+        raw = state.get("players_list")
+        if not isinstance(raw, list):
+            return set()
+        out: set[str] = set()
+        for item in raw:
+            if isinstance(item, str):
+                out.add(item)
+            elif isinstance(item, dict) and isinstance(item.get("name"), str):
+                out.add(item["name"])
+        return out
+
+    def _write_players(players: set[str]) -> None:
+        ordered = sorted(players, key=lambda n: n.lower())
+        state["players_list"] = [
+            {"name": n, "head_url": f"https://mc-heads.net/avatar/{n}/32"}
+            for n in ordered
+        ]
+        state["players_online"] = len(ordered)
+
     try:
         if proc.stdout is None:
             return
@@ -1116,9 +1147,35 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
                 try:
                     state["players_online"] = int(m.group(1))
                     state["max_players"] = int(m.group(2))
+
+                    names_match = re.search(r"players online:\s*(.+)$", clean, flags=re.IGNORECASE)
+                    if names_match:
+                        names = {
+                            n.strip()
+                            for n in names_match.group(1).split(",")
+                            if n.strip() and n.strip() != "(none)"
+                        }
+                        _write_players(names)
+
                     recorder.write_state(state)
                 except Exception:
                     pass
+
+            joined = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+joined the game", clean)
+            if joined:
+                players = _current_players()
+                players.add(joined.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
+
+            left = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+left the game", clean)
+            if left:
+                players = _current_players()
+                players.discard(left.group(1))
+                _write_players(players)
+                recorder.write_state(state)
+                continue
     except Exception as e:
         warn(f"[server:{server_id}] output pump error: {e}")
 

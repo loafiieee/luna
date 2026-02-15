@@ -1368,8 +1368,9 @@ def _metrics_loop(*, state: Dict[str, Any], recorder: RuntimeRecorder, stop_evt:
                 hist = []
             if cpu is not None:
                 hist.append(float(cpu))
-            if len(hist) > 24:
-                hist = hist[-24:]
+            # Keep roughly the last minute of metrics (sample interval is 2s).
+            if len(hist) > 30:
+                hist = hist[-30:]
             state["cpu_history"] = hist
 
             ram_hist = state.get("ram_used_history")
@@ -1378,8 +1379,9 @@ def _metrics_loop(*, state: Dict[str, Any], recorder: RuntimeRecorder, stop_evt:
             ram_sample = heap_used if heap_used is not None else proc_ram
             if ram_sample is not None:
                 ram_hist.append(float(ram_sample))
-            if len(ram_hist) > 24:
-                ram_hist = ram_hist[-24:]
+            # Keep roughly the last minute of metrics (sample interval is 2s).
+            if len(ram_hist) > 30:
+                ram_hist = ram_hist[-30:]
             state["ram_used_history"] = ram_hist
             state["metrics_updated_at"] = time.time()
             recorder.write_state(state)

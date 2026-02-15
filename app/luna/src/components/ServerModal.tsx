@@ -58,6 +58,9 @@ export function ServerModal({
   const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [playerActionMenu, setPlayerActionMenu] = useState<{ name: string; x: number; y: number } | null>(null);
+  const [confirmPlayerAction, setConfirmPlayerAction] = useState<{ action: "ban" | "op" | "deop" | "kick"; name: string } | null>(null);
+  const [playerActionBusy, setPlayerActionBusy] = useState(false);
 
   const players: Array<{ name: string; head_url?: string }> = useMemo(() => playersList(server), [server]);
 
@@ -108,7 +111,40 @@ export function ServerModal({
     }
   }
 
-  async function copyAddress() {
+  
+async function runPlayerCommand(action: "ban" | "op" | "deop" | "kick" | "copy", name: string) {
+  if (!name) return;
+
+  if (action === "copy") {
+    try {
+      await navigator.clipboard.writeText(name);
+      addLog("ok", `Copied username "${name}".`);
+    } catch {
+      addLog("warn", "Could not copy to clipboard automatically.");
+    }
+    setPlayerActionMenu(null);
+    return;
+  }
+
+  const cmd =
+    action === "kick" ? `kick ${name}` :
+    action === "ban" ? `ban ${name}` :
+    action === "op" ? `op ${name}` :
+    `deop ${name}`;
+
+  try {
+    setPlayerActionBusy(true);
+    await invoke("send_server_console_command", { serverId: server.server_id, command: cmd });
+    addLog("ok", `Sent "${cmd}".`);
+  } catch (e: any) {
+    addLog("err", `Failed to send "${cmd}": ${String(e)}`);
+  } finally {
+    setPlayerActionBusy(false);
+    setPlayerActionMenu(null);
+  }
+}
+
+async function copyAddress() {
     if (!address) return;
     try {
       if (navigator.clipboard?.writeText) {
@@ -264,8 +300,21 @@ export function ServerModal({
                 <div style={styles.playersEmpty}>No players found.</div>
               )
             ) : (
-              filteredPlayers.map((p) => <PlayerRow key={p.name} name={p.name} headUrl={p.head_url} />)
+              filteredPlayers.map((p) => (
+                <PlayerRow
+                  key={p.name}
+                  name={p.name}
+                  headUrl={p.head_url}
+                  onOpenMenu={(name, evt) => {
+                    const rect = (evt.currentTarget as HTMLDivElement).getBoundingClientRect();
+                    setPlayerActionMenu({ name, x: rect.right - 10, y: rect.top + rect.height });
+                  }}
+                />
+              ))
             )}
+          </div>
+          <div style={{ marginTop: 8, opacity: 0.65, fontWeight: 800, fontSize: 12 }}>
+            Bans manager (coming soon). For now, use <span style={{ fontFamily: "monospace" }}>pardon &lt;name&gt;</span> in Console.
           </div>
         </div>
       </div>
@@ -323,9 +372,53 @@ function NavItem({ label, active, onClick }: { label: string; active: boolean; o
   );
 }
 
-function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
+function MenuItem({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
   return (
-    <div style={styles.playerRow}>
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        padding: "8px 10px",
+        borderRadius: 12,
+        border: "1px solid rgba(255,255,255,.06)",
+        background: "rgba(255,255,255,.04)",
+        color: "rgba(255,255,255,.92)",
+        fontWeight: 900,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.45 : 1,
+        marginBottom: 6,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PlayerRow({
+  name,
+  headUrl,
+  onOpenMenu,
+}: {
+  name: string;
+  headUrl?: string;
+  onOpenMenu: (name: string, evt: import("react").MouseEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      style={{ ...styles.playerRow, cursor: "pointer" }}
+      onClick={(e) => onOpenMenu(name, e)}
+      title="Click for actions"
+    >
       <div style={styles.playerHead}>
         {headUrl ? (
           <img src={headUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -333,10 +426,12 @@ function PlayerRow({ name, headUrl }: { name: string; headUrl?: string }) {
           <div style={{ fontSize: 12, opacity: 0.8 }}>{name.slice(0, 2).toUpperCase()}</div>
         )}
       </div>
-      <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis" }}>{name}</div>
+      <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>{name}</div>
+      <div style={{ opacity: 0.65, fontWeight: 900 }}>⋯</div>
     </div>
   );
 }
+
 
 function ConsolePane({
   server,
@@ -425,7 +520,8 @@ function ConsolePane({
     };
 
     poll();
-    pollerRef.current = window.setInterval(poll, 300);
+    // Don't hammer the backend; 2–3 polls/sec is plenty and avoids huge log backlogs.
+    pollerRef.current = window.setInterval(poll, 500);
 
     let observer: ResizeObserver | null = null;
     if (containerRef.current && "ResizeObserver" in window) {
@@ -500,8 +596,9 @@ function ConsolePane({
 }
 
 function DetailsPane({ server }: { server: ServerInfo }) {
-  const rt: any = server.runtime ?? {};
   const isOnline = isServerOnline(server);
+  // When offline, don't show stale perf stats from the previous run.
+  const rt: any = isOnline ? (server.runtime ?? {}) : {};
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -511,7 +608,8 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   }, [isOnline]);
 
   const cpuPercent = pickCpuPercent(rt);
-  const ramMb = pickRamMb(rt);
+  const ramUsedMb = pickRamUsedMb(rt);
+  const ramMaxMb = pickRamMaxMb(rt);
 
   const startedAtSec = typeof rt.started_at === "number" ? rt.started_at : null;
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
@@ -524,7 +622,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
 
       <div style={styles.detailsMetricsGrid}>
         <KV k="CPU usage" v={cpuPercent != null ? `${cpuPercent.toFixed(1)}%` : "—"} />
-        <KV k="RAM usage" v={ramMb != null ? `${ramMb.toFixed(0)} MB` : "—"} />
+        <KV k="RAM usage" v={ramUsedMb != null ? `${ramUsedMb.toFixed(0)}${ramMaxMb != null ? `/${ramMaxMb.toFixed(0)}` : ""} MB` : "—"} />
         <KV k="Server uptime" v={formatUptime(uptimeSeconds)} mono />
       </div>
 
@@ -647,6 +745,38 @@ function pickRamMb(rt: any): number | null {
 
   return null;
 }
+
+function pickRamUsedMb(rt: any): number | null {
+  const candidates = [
+    rt?.ram_used_mb,
+    rt?.heap_used_mb,
+    rt?.metrics?.ram_used_mb,
+    rt?.metrics?.heap_used_mb,
+    rt?.stats?.ram_used_mb,
+  ];
+  for (const v of candidates) {
+    const parsed = parseMemoryToMb(v);
+    if (parsed != null && parsed >= 0) return parsed;
+  }
+  // fallback to process/legacy RAM value
+  return pickRamMb(rt);
+}
+
+function pickRamMaxMb(rt: any): number | null {
+  const candidates = [
+    rt?.ram_max_mb,
+    rt?.heap_max_mb,
+    rt?.metrics?.ram_max_mb,
+    rt?.metrics?.heap_max_mb,
+    rt?.stats?.ram_max_mb,
+  ];
+  for (const v of candidates) {
+    const parsed = parseMemoryToMb(v);
+    if (parsed != null && parsed > 0) return parsed;
+  }
+  return null;
+}
+
 
 function buildPerfSamples(rt: any): number[] {
   const candidates = [rt?.cpu_history, rt?.metrics?.cpu, rt?.performance?.cpu, rt?.history?.cpu];

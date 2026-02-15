@@ -403,16 +403,37 @@ fn read_server_console(
 
     let mut file = File::open(&path).map_err(|e| e.to_string())?;
     let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+
+    // Fast-path: callers sometimes just want the current end offset without reading/parsing
+    // the entire console file (which can be very large). max_lines=0 is that sentinel.
+    if matches!(max_lines, Some(0)) {
+        return Ok(ConsoleReadResult {
+            lines: Vec::new(),
+            offset: file_len,
+        });
+    }
+
+    // If the caller's offset is beyond EOF (file truncated/rotated or app restarted),
+    // do **not** restart from 0 (that could force parsing a huge file and crash the app).
+    // Instead, tail from near the end.
+    const TAIL_BYTES_ON_RESET: u64 = 512 * 1024; // 512 KiB
     let mut start_offset = offset.unwrap_or(0);
     if start_offset > file_len {
-        start_offset = 0;
+        start_offset = file_len.saturating_sub(TAIL_BYTES_ON_RESET);
     }
     file.seek(SeekFrom::Start(start_offset))
         .map_err(|e| e.to_string())?;
 
     let mut lines: Vec<String> = Vec::new();
     let mut reader = BufReader::new(file);
-    for line in reader.by_ref().lines() {
+    let limit = max_lines.unwrap_or(400);
+    // Additional safety: never parse unbounded content in one request.
+    // If we hit this, we'll return the most recent lines within `limit`.
+    const MAX_LINES_SCANNED: usize = 10_000;
+    for (i, line) in reader.by_ref().lines().enumerate() {
+        if i >= MAX_LINES_SCANNED {
+            break;
+        }
         let raw = line.map_err(|e| e.to_string())?;
         let parsed = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
         if let Some(text) = parsed.get("line").and_then(|v| v.as_str()) {
@@ -421,8 +442,6 @@ fn read_server_console(
     }
 
     let consumed_to = reader.stream_position().map_err(|e| e.to_string())?;
-
-    let limit = max_lines.unwrap_or(400);
     if lines.len() > limit {
         let drain_count = lines.len() - limit;
         lines.drain(0..drain_count);

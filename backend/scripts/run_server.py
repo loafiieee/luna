@@ -15,6 +15,11 @@ import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+
+# Windows CPU sampling helper: Get-Process returns cumulative CPU time in seconds.
+# We convert it to percent using deltas between samples.
+_WIN_CPU_LAST: Dict[int, Tuple[float, float]] = {}
+
 from backend.utils.state import STATE
 from backend.utils.paths import (
     runtime_dir,
@@ -206,12 +211,31 @@ def _pid_listening_on_tcp_port(port: int) -> int:
 
     try:
         if os.name == "nt":
-            # netstat output line ends with PID on Windows
+            # Prefer PowerShell (more reliable than parsing netstat output)
+            try:
+                cmd = (
+                    "Get-NetTCPConnection -State Listen -LocalPort "
+                    + str(p)
+                    + " | Select-Object -First 1 -ExpandProperty OwningProcess"
+                )
+                out = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", cmd],
+                    text=True,
+                    errors="ignore",
+                ).strip()
+                if out.isdigit():
+                    pid = int(out)
+                    if pid > 0:
+                        return pid
+            except Exception:
+                pass
+
+            # Fallback: netstat output line ends with PID on Windows
             out = subprocess.check_output(["netstat", "-ano", "-p", "tcp"], text=True, errors="ignore")
             needle = f":{p}"
             for line in out.splitlines():
                 low = line.strip().lower()
-                if "listen" not in low:
+                if "listen" not in low:  # matches LISTENING
                     continue
                 if needle not in line:
                     continue
@@ -1010,6 +1034,144 @@ def _read_max_players_from_properties(server_dir: str) -> Optional[int]:
         return None
     return None
 
+# ---------------- Java status ping (Server List Ping) ----------------
+
+
+def _varint_encode(value: int) -> bytes:
+    out = bytearray()
+    v = value & 0xFFFFFFFF
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def _varint_decode(sock: socket.socket) -> int:
+    num_read = 0
+    result = 0
+    while True:
+        b = sock.recv(1)
+        if not b:
+            raise EOFError('socket closed')
+        val = b[0]
+        result |= (val & 0x7F) << (7 * num_read)
+        num_read += 1
+        if num_read > 5:
+            raise ValueError('varint too big')
+        if (val & 0x80) == 0:
+            break
+    return result
+
+
+def _mc_pack_string(s: str) -> bytes:
+    data = s.encode('utf-8')
+    return _varint_encode(len(data)) + data
+
+
+def _java_status_ping(host: str, port: int, *, timeout_s: float = 1.25) -> Optional[Dict[str, Any]]:
+    """Best-effort Minecraft Java status ping.
+
+    Notes:
+    - Uses protocol version 0 (many servers still reply with status JSON).
+    - Returns parsed JSON dict on success, else None.
+    """
+    # Some modern servers are picky about protocol version; try a small set.
+    # (0 works for many, but not all.)
+    proto_candidates = [
+        0,
+        47,  # 1.8 era but sometimes still accepted
+        758, 759, 760, 761, 762, 763, 764, 765, 766, 767, 768,
+    ]
+
+    for proto_ver in proto_candidates:
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout_s) as s:
+                s.settimeout(timeout_s)
+
+                next_state = 1  # status
+
+                # Handshake packet (id 0)
+                hs = bytearray()
+                hs += _varint_encode(0)  # packet id
+                hs += _varint_encode(int(proto_ver))
+                hs += _mc_pack_string(host)
+                hs += struct.pack('>H', int(port))
+                hs += _varint_encode(next_state)
+                s.sendall(_varint_encode(len(hs)) + hs)
+
+                # Status request packet (id 0)
+                req = _varint_encode(0)
+                s.sendall(_varint_encode(len(req)) + req)
+
+                # Read response packet
+                _ = _varint_decode(s)  # packet length (unused)
+                pkt_id = _varint_decode(s)
+                if pkt_id != 0:
+                    continue
+                json_len = _varint_decode(s)
+                raw = b''
+                while len(raw) < json_len:
+                    chunk = s.recv(json_len - len(raw))
+                    if not chunk:
+                        break
+                    raw += chunk
+                if len(raw) != json_len:
+                    continue
+                parsed = json.loads(raw.decode('utf-8', errors='ignore'))
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception:
+            continue
+    return None
+
+
+def _status_poll_loop(*, state: Dict[str, Any], recorder: RuntimeRecorder, stop_evt: threading.Event) -> None:
+    """Poll Java status so player counts update even when stdout is detached."""
+    while not stop_evt.is_set():
+        try:
+            java_port = int(state.get('java_port') or 0)
+            if java_port > 0 and str(state.get('state')) in ('starting', 'running'):
+                info_json = _java_status_ping('127.0.0.1', java_port)
+                if isinstance(info_json, dict):
+                    players = info_json.get('players')
+                    if isinstance(players, dict):
+                        online = players.get('online')
+                        mx = players.get('max')
+                        if isinstance(online, int):
+                            state['players_online'] = online
+                        if online == 0:
+                            state['players_list'] = []
+
+                        if isinstance(mx, int):
+                            state['max_players'] = mx
+
+                        sample = players.get('sample')
+                        if isinstance(sample, list):
+                            names = []
+                            for it in sample:
+                                if isinstance(it, dict) and isinstance(it.get('name'), str):
+                                    names.append(it['name'])
+                            state['players_list'] = [
+                                {"name": n, "head_url": f"https://mc-heads.net/avatar/{n}/32"}
+                                for n in sorted(set(names), key=lambda x: x.lower())
+                            ]
+
+                    state['status_updated_at'] = time.time()
+                    recorder.write_state(state)
+        except Exception:
+            pass
+        # Don’t hammer the server
+        for _ in range(10):
+            if stop_evt.is_set():
+                break
+            time.sleep(0.5)
+
+
 
 def _sample_process_metrics(pid: int) -> Tuple[Optional[float], Optional[float]]:
     """Return cpu_percent, ram_mb best-effort."""
@@ -1017,15 +1179,68 @@ def _sample_process_metrics(pid: int) -> Tuple[Optional[float], Optional[float]]
         return None, None
     try:
         if os.name == "nt":
-            out = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], text=True, errors="ignore")
-            row = out.strip()
-            if not row or row.startswith("INFO:"):
-                return None, None
-            parts = [p.strip().strip('"') for p in row.split(",")]
-            mem_raw = parts[-2] if len(parts) >= 5 else ""
-            digits = "".join(ch for ch in mem_raw if ch.isdigit())
-            ram_mb = float(digits) / 1024.0 if digits else None
-            return None, ram_mb
+            # Windows: Get-Process gives us working set (bytes) and cumulative CPU time (seconds).
+            # We convert cumulative CPU -> percent using deltas between samples.
+            cmd = (
+                "(Get-Process -Id "
+                + str(pid)
+                + " | Select-Object -First 1 CPU,WorkingSet64 | ConvertTo-Json -Compress)"
+            )
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                text=True,
+                errors="ignore",
+            ).strip()
+
+            try:
+                obj = json.loads(out) if out else None
+            except Exception:
+                obj = None
+
+            cpu_sec: Optional[float] = None
+            ws_bytes: Optional[float] = None
+            if isinstance(obj, dict):
+                v = obj.get("CPU")
+                if isinstance(v, (int, float)):
+                    cpu_sec = float(v)
+                v = obj.get("WorkingSet64")
+                if isinstance(v, (int, float)):
+                    ws_bytes = float(v)
+
+            ram_mb = (ws_bytes / (1024.0 * 1024.0)) if ws_bytes is not None else None
+
+            # Fallback for RAM if PowerShell JSON path fails for any reason.
+            if ram_mb is None:
+                try:
+                    out2 = subprocess.check_output(
+                        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                        text=True,
+                        errors="ignore",
+                    )
+                    row = out2.strip()
+                    if row and not row.startswith("INFO:"):
+                        parts = [p.strip().strip('"') for p in row.split(",")]
+                        mem_raw = parts[-1] if len(parts) >= 5 else ""
+                        digits = "".join(ch for ch in mem_raw if ch.isdigit())
+                        if digits:
+                            ram_mb = float(digits) / 1024.0
+                except Exception:
+                    pass
+
+            # CPU% needs at least two samples.
+            now = time.time()
+            cpu_pct: Optional[float] = None
+            if cpu_sec is not None:
+                last = _WIN_CPU_LAST.get(pid)
+                if last is not None:
+                    last_cpu, last_t = last
+                    dt = max(1e-6, now - float(last_t))
+                    dcpu = max(0.0, float(cpu_sec) - float(last_cpu))
+                    cores = max(1, int(os.cpu_count() or 1))
+                    cpu_pct = (dcpu / dt) * 100.0 / cores
+                _WIN_CPU_LAST[pid] = (cpu_sec, now)
+
+            return cpu_pct, ram_mb
         out = subprocess.check_output(["ps", "-p", str(pid), "-o", "%cpu=,rss="], text=True, errors="ignore")
         line = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
         if not line:
@@ -1038,6 +1253,77 @@ def _sample_process_metrics(pid: int) -> Tuple[Optional[float], Optional[float]]
     except Exception:
         return None, None
 
+
+
+
+def _find_jcmd(server_dir: str) -> Optional[str]:
+    """Find jcmd next to the server's bundled Java, if present."""
+    try:
+        java_cmd = _find_java_cmd(server_dir)
+        if not java_cmd:
+            return None
+        java_path = Path(java_cmd)
+        # .../bin/java(.exe) -> .../bin/jcmd(.exe)
+        jcmd_name = "jcmd.exe" if os.name == "nt" else "jcmd"
+        cand = java_path.parent / jcmd_name
+        if cand.exists():
+            return str(cand)
+        # Sometimes java_cmd might be a wrapper; fall back to searching under jdk/bin
+        for p in Path(server_dir).rglob(jcmd_name):
+            if p.is_file() and (p.parent.name == "bin"):
+                return str(p)
+    except Exception:
+        return None
+    return None
+
+
+_HEAP_RE_1 = re.compile(r"\bused\s+(\d+)([KMG])\b", re.IGNORECASE)
+_HEAP_RE_2 = re.compile(r"\bused\s+(\d+)\s*bytes\b", re.IGNORECASE)
+_HEAP_RE_3 = re.compile(r"\bused\s+(\d+)K\b", re.IGNORECASE)
+
+
+def _parse_heap_used_mb(text: str) -> Optional[float]:
+    # Common HotSpot formats include:
+    #   "garbage-first heap   total 2097152K, used 1024000K"
+    #   "used 1024000K"
+    m = _HEAP_RE_1.search(text or "")
+    if m:
+        n = float(m.group(1))
+        unit = m.group(2).upper()
+        if unit == "K":
+            return n / 1024.0
+        if unit == "M":
+            return n
+        if unit == "G":
+            return n * 1024.0
+    m = _HEAP_RE_2.search(text or "")
+    if m:
+        b = float(m.group(1))
+        return b / (1024.0 * 1024.0)
+    m = _HEAP_RE_3.search(text or "")
+    if m:
+        return float(m.group(1)) / 1024.0
+    return None
+
+
+def _sample_heap_used_mb(pid: int, server_dir: str) -> Optional[float]:
+    """Best-effort Java heap USED (MB) using jcmd. Cross-platform if JDK is present."""
+    if pid <= 0:
+        return None
+    jcmd = _find_jcmd(server_dir)
+    if not jcmd:
+        return None
+    try:
+        out = subprocess.check_output(
+            [jcmd, str(pid), "GC.heap_info"],
+            text=True,
+            errors="ignore",
+            timeout=2.5,
+        )
+        used = _parse_heap_used_mb(out)
+        return used
+    except Exception:
+        return None
 
 def _resolve_metrics_pid(state: Dict[str, Any]) -> int:
     pid = int(state.get("server_pid") or 0)
@@ -1065,15 +1351,23 @@ def _metrics_loop(*, state: Dict[str, Any], recorder: RuntimeRecorder, stop_evt:
     while not stop_evt.is_set():
         try:
             pid = _resolve_metrics_pid(state)
-            cpu, ram = _sample_process_metrics(pid)
+            cpu, proc_ram = _sample_process_metrics(pid)
+            # Prefer Java heap-used (MB) for the RAM panel; keep process RAM separately.
+            server_dir = state.get("server_dir") or state.get("folder") or ""
+            heap_used = _sample_heap_used_mb(pid, str(server_dir)) if isinstance(server_dir, str) else None
+
             if cpu is not None:
                 state["cpu_percent"] = round(float(cpu), 2)
-            if ram is not None:
-                state["ram_mb"] = round(float(ram), 2)
+            if proc_ram is not None:
+                state["ram_process_mb"] = round(float(proc_ram), 2)
+            if heap_used is not None:
+                state["ram_used_mb"] = round(float(heap_used), 2)
+
             hist = state.get("cpu_history")
             if not isinstance(hist, list):
                 hist = []
-            hist.append(float(cpu) if cpu is not None else 0.0)
+            if cpu is not None:
+                hist.append(float(cpu))
             if len(hist) > 24:
                 hist = hist[-24:]
             state["cpu_history"] = hist
@@ -1128,6 +1422,7 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
     try:
         if proc.stdout is None:
             return
+        pending_prefix: Optional[str] = None
         for line in iter(proc.stdout.readline, ""):
             if stop_evt.is_set():
                 break
@@ -1136,6 +1431,17 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
             clean = line.rstrip("\n").rstrip("\r")
             if clean == "":
                 continue
+
+            # Some servers/wrappers occasionally emit the log prefix on its own line
+            # e.g. "[01:20:21 INFO]:" followed by "Player joined the game".
+            # Stitch the next line back onto the prefix so our regexes still match.
+            if re.match(r"^\[[0-9:]+\s+[A-Z]+\]:\s*$", clean):
+                pending_prefix = clean
+                continue
+            if pending_prefix and not clean.lstrip().startswith("["):
+                clean = f"{pending_prefix} {clean.lstrip()}"
+                pending_prefix = None
+
             # Emit to UI
             _emit_console(server_id=server_id, line=clean)
             # Persist for reattach
@@ -1162,6 +1468,8 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
                     pass
 
             joined = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+joined the game", clean)
+            if not joined:
+                joined = re.search(r"^([A-Za-z0-9_]{1,16})\s+joined the game\b", clean)
             if joined:
                 players = _current_players()
                 players.add(joined.group(1))
@@ -1170,6 +1478,13 @@ def _pump_stdout(proc: subprocess.Popen, *, server_id: str, recorder: RuntimeRec
                 continue
 
             left = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+left the game", clean)
+            if not left:
+                left = re.search(r"^([A-Za-z0-9_]{1,16})\s+left the game\b", clean)
+            # Some servers log disconnects as 'lost connection' instead of (or in addition to) 'left the game'.
+            if not left:
+                left = re.search(r"\]:\s*([A-Za-z0-9_]{1,16})\s+lost connection\b", clean)
+            if not left:
+                left = re.search(r"^([A-Za-z0-9_]{1,16})\s+lost connection\b", clean)
             if left:
                 players = _current_players()
                 players.discard(left.group(1))
@@ -1418,6 +1733,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
         "version": version,
         "name": name,
         "folder": folder,
+        "server_dir": server_dir,
         "edition": edition,
         "state": "starting",
         "manager_pid": os.getpid(),
@@ -1431,6 +1747,9 @@ def run_server(edition: str, platform: str, version: str, name: str):
         "max_players": max_players,
         "players_online": 0,
         "cpu_history": [],
+        "ram_max_mb": ram if isinstance(ram, int) else None,
+        "ram_used_mb": None,
+        "ram_process_mb": None,
     }
     recorder.write_state(state)
     _emit_state(
@@ -1482,6 +1801,17 @@ def run_server(edition: str, platform: str, version: str, name: str):
             except Exception as e:
                 warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
 
+
+
+        # ---- Orphan cleanup: if a prior session crashed and the server is still bound, stop it ----
+        try:
+            if edition in ("java", "both") and int(java_port) > 0:
+                orphan_pid = _pid_listening_on_tcp_port(int(java_port))
+                if orphan_pid and orphan_pid > 0:
+                    warn(f"[runtime] Detected process {orphan_pid} already listening on :{java_port}. Attempting to stop it (likely orphaned from a prior crash).")
+                    _terminate_pid(orphan_pid, timeout_s=8.0)
+        except Exception:
+            pass
         # ---- Start the server process ----
         popen_kw = _make_popen_kwargs()
 
@@ -1577,6 +1907,557 @@ def run_server(edition: str, platform: str, version: str, name: str):
         threading.Thread(target=_pump_stdin_from_parent, args=(proc,), kwargs={"stop_evt": stop_evt}, daemon=True).start()
         threading.Thread(target=_pump_control_file, args=(proc,), kwargs={"control_path": recorder.control_path, "stop_evt": stop_evt}, daemon=True).start()
         threading.Thread(target=_metrics_loop, kwargs={"state": state, "recorder": recorder, "stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_status_poll_loop, kwargs={"state": state, "recorder": recorder, "stop_evt": stop_evt}, daemon=True).start()
+
+        # ---- Readiness + tunnel (bedrock-only starts tunnel after readiness) ----
+        if edition == "java":
+            tcp_ready_once = wait_tcp_open("127.0.0.1", int(java_port), timeout_s=45.0)
+            if not tcp_ready_once:
+                warn(f"[tunnel] Server never opened TCP port {java_port}; tunnel may not work until it does.")
+            if tunnel_started and tunnel_info and tcp_ready_once:
+                info(f"[tunnel] Java join: {tunnel_info.public_tcp_address}")
+                if tunnel_info.public_voice_address:
+                    info(
+                        f"[voicechat] Voice should auto-connect (voice_host set). Public voice: {tunnel_info.public_voice_address}"
+                    )
+
+        elif edition == "bedrock":
+            udp_ready_once = wait_bedrock_udp_ready("127.0.0.1", int(bedrock_port), timeout_s=45.0)
+            if udp_ready_once and tunneling:
+                try:
+                    tunnel_info = TUNNEL.start(
+                        server_id=server_id,
+                        sticky_address=sticky_address,
+                        services=[{"svc": "bedrock", "proto": "udp", "local": int(bedrock_port)}],
+                    )
+                    tunnel_started = True
+                    info(f"[tunnel] Bedrock join: {tunnel_info.public_udp_address}")
+                except Exception as e:
+                    warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
+            elif not udp_ready_once:
+                warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; not starting tunnel.")
+
+        elif edition == "both":
+            tcp_ready_once = wait_tcp_open("127.0.0.1", int(java_port), timeout_s=45.0)
+            udp_ready_once = wait_bedrock_udp_ready("127.0.0.1", int(bedrock_port), timeout_s=45.0)
+
+            if not tcp_ready_once:
+                warn(f"[tunnel] Java never opened TCP port {java_port}; join may fail until it does.")
+            if not udp_ready_once:
+                warn(f"[tunnel] Bedrock never answered UDP ping on {bedrock_port}; Bedrock join may fail until it does.")
+
+            if tunnel_started and tunnel_info and tcp_ready_once:
+                info(f"[tunnel] Java join: {tunnel_info.public_tcp_address}")
+            if tunnel_started and tunnel_info and udp_ready_once:
+                info(f"[tunnel] Bedrock join: {tunnel_info.public_udp_address}")
+            if tunnel_started and tunnel_info and tunnel_info.public_voice_address:
+                info(
+                    f"[voicechat] Voice should auto-connect (voice_host set). Public voice: {tunnel_info.public_voice_address}"
+                )
+
+        # Announce running state
+        tunnel_payload = (
+            {
+                "subdomain": getattr(tunnel_info, "subdomain", None),
+                "domain_suffix": getattr(tunnel_info, "domain_suffix", None),
+                "public_tcp_address": getattr(tunnel_info, "public_tcp_address", None),
+                "public_udp_address": getattr(tunnel_info, "public_udp_address", None),
+                "public_voice_address": getattr(tunnel_info, "public_voice_address", None),
+            }
+            if tunnel_info
+            else None
+        )
+        state["ready"] = {"tcp": bool(tcp_ready_once), "udp": bool(udp_ready_once)}
+        state["tunnel"] = tunnel_payload
+        recorder.write_state(state)
+
+        _emit_state(
+            server_id=server_id,
+            state="running",
+            java_port=java_port,
+            bedrock_port=bedrock_port,
+            voice_port=voice_local_port,
+            tunnel=tunnel_payload,
+        )
+
+        # ---- Monitor: stop tunnel when server exits or java TCP port closes ----
+        detached_server_detected = False
+        while True:
+            code = proc.poll()
+            if code is not None:
+                # Some launch scripts (notably certain forge/neoforge run scripts) can
+                # spawn the real JVM process and then exit immediately. In that case the
+                # wrapper process is gone but the server is still online.
+                if edition in ("java", "both") and is_tcp_open("127.0.0.1", int(java_port)):
+                    if not detached_server_detected:
+                        detached_server_detected = True
+                        state["server_pid"] = None
+                        state["detached_process"] = True
+                        state["state"] = "running"
+                        recorder.write_state(state)
+                        warn(
+                            "[runtime] launcher process exited but server port is still open; "
+                            "keeping state as running (detached server process detected)."
+                        )
+                    time.sleep(1.0)
+                    continue
+                break
+
+            if tunnel_started and tcp_ready_once and edition in ("java", "both"):
+                if not is_tcp_open("127.0.0.1", int(java_port)):
+                    warn(f"[tunnel] Local TCP port {java_port} closed; stopping tunnel.")
+                    TUNNEL.stop()
+                    tunnel_started = False
+
+            time.sleep(1.0)
+
+        exit_code = proc.poll()
+        state["state"] = "stopped"
+        state["exit_code"] = exit_code
+        recorder.write_state(state)
+        _emit_state(server_id=server_id, state="stopped", exit_code=exit_code)
+
+    finally:
+        stop_evt.set()
+        if tunnel_started:
+            try:
+                TUNNEL.stop()
+            except Exception:
+                pass
+
+        if proc and proc.poll() is None:
+            try:
+                _write_to_stdin(proc, "stop")
+            except Exception:
+                pass
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=8)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        recorder.close()
+
+
+def _write_to_stdin(proc: subprocess.Popen, line: str) -> None:
+    if proc.stdin is None:
+        return
+    try:
+        proc.stdin.write(line)
+        if not line.endswith("\n"):
+            proc.stdin.write("\n")
+        proc.stdin.flush()
+    except Exception:
+        pass
+
+
+def _pump_stdin_from_parent(proc: subprocess.Popen, *, stop_evt: threading.Event) -> None:
+    """Forward our own stdin -> child stdin (for UI/terminal input)."""
+    try:
+        while not stop_evt.is_set():
+            line = sys.stdin.readline()
+            if line == "":
+                break
+            _write_to_stdin(proc, line.rstrip("\n"))
+    except Exception:
+        pass
+
+
+def _pump_control_file(proc: subprocess.Popen, *, control_path: Path, stop_evt: threading.Event) -> None:
+    """Poll runtime/control.ndjson for commands from other CLI invocations."""
+    pos = 0
+    while not stop_evt.is_set():
+        try:
+            if not control_path.exists():
+                time.sleep(0.25)
+                continue
+
+            size = control_path.stat().st_size
+            if size < pos:
+                pos = 0
+
+            with open(control_path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(pos)
+                while not stop_evt.is_set():
+                    line = f.readline()
+                    if not line:
+                        break
+                    pos = f.tell()
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    t = obj.get("t")
+                    if t == "stdin":
+                        payload = obj.get("line")
+                        if isinstance(payload, str):
+                            _write_to_stdin(proc, payload)
+                    elif t == "stop":
+                        _write_to_stdin(proc, "stop")
+                        # also try terminate as fallback
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        time.sleep(0.25)
+
+
+# ---------------- Stop commands (D1-friendly) ----------------
+
+
+def stop_server(*, server_id: str, timeout_s: float = 15.0) -> bool:
+    """Stop a running server by server_id using runtime state/control files."""
+    sid = str(server_id)
+    st_path = runtime_state_path(sid)
+    ctl_path = runtime_control_path(sid)
+
+    if not st_path.exists():
+        return False
+
+    try:
+        state = json.loads(st_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            state = {}
+    except Exception:
+        state = {}
+
+    pid = int(state.get("server_pid") or 0)
+    mgr_pid = int(state.get("manager_pid") or 0)
+    detached = bool(state.get("detached_process"))
+    java_port = int(state.get("java_port") or 0)
+
+    if pid <= 0 and detached and java_port > 0:
+        pid = _pid_listening_on_tcp_port(java_port)
+
+    # Ask manager to stop gracefully if it exists
+    try:
+        ctl_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(ctl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": "stop", "timestamp": time.time()}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+    end = time.time() + timeout_s
+    while time.time() < end:
+        # Detached launchers may not expose a stable PID in state, so keep re-resolving.
+        if not pid and detached and java_port > 0:
+            pid = _pid_listening_on_tcp_port(java_port)
+        if pid and not _pid_exists(pid):
+            _mark_runtime_stopped(sid, reason="pid_exited")
+            return True
+        if detached and java_port > 0 and not is_tcp_open("127.0.0.1", java_port):
+            _mark_runtime_stopped(sid, reason="port_closed")
+            return True
+        # if manager died, we still may need to kill pid
+        time.sleep(0.25)
+
+    # Fallback: kill server pid
+    if not pid and detached and java_port > 0:
+        pid = _pid_listening_on_tcp_port(java_port)
+
+    if pid:
+        _terminate_pid(pid, timeout_s=8.0)
+
+    # As a last resort, kill manager too
+    if mgr_pid and _pid_exists(mgr_pid):
+        _terminate_pid(mgr_pid, timeout_s=4.0)
+
+    # Confirm
+    if pid:
+        stopped = not _pid_exists(pid)
+        if stopped:
+            _mark_runtime_stopped(sid, reason="pid_terminated")
+        return stopped
+
+    if detached and java_port > 0:
+        stopped = not is_tcp_open("127.0.0.1", java_port)
+        if stopped:
+            _mark_runtime_stopped(sid, reason="detached_port_closed")
+        return stopped
+
+    _mark_runtime_stopped(sid, reason="no_active_process")
+    return True
+
+
+def stop_all(timeout_s: float = 15.0) -> List[str]:
+    """Stop all servers that have runtime state files. Returns list of server_ids stopped."""
+    stopped: List[str] = []
+    base = runtime_dir()
+    try:
+        if not base.exists():
+            return []
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            sid = child.name
+            if stop_server(server_id=sid, timeout_s=timeout_s):
+                stopped.append(sid)
+    except Exception:
+        return stopped
+    return stopped
+
+
+# ---------------- Main runner ----------------
+
+
+def _find_java_cmd(server_dir: str) -> str:
+    jdk_dir = Path(server_dir) / "jdk"
+    suffix = ".exe" if os.name == "nt" else ""
+
+    direct = jdk_dir / "bin" / f"java{suffix}"
+    if direct.exists():
+        return str(direct)
+
+    if jdk_dir.exists():
+        for subdir in jdk_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            candidate = subdir / "bin" / f"java{suffix}"
+            if candidate.exists():
+                return str(candidate)
+
+    raise RuntimeError(f"Java executable not found in {jdk_dir}")
+
+
+def run_server(edition: str, platform: str, version: str, name: str):
+    server_config = get_per_server_config(platform, version, name)
+
+    # Prefer the edition recorded in servers.json (CLI arg is still required for now)
+    edition = str(server_config.get("edition") or edition)
+
+    ram = server_config.get("ram")
+    eula = server_config.get("eula")
+    folder = server_config.get("folder")
+
+    server_id = str(server_config.get("server_id") or "")
+    sticky_address = bool(server_config.get("sticky_address", True))
+    tunneling = bool(server_config.get("tunneling", True))
+
+    if not server_id:
+        server_id = str(uuid.uuid4())
+        server_config["server_id"] = server_id
+
+    recorder = RuntimeRecorder(server_id)
+
+    # Keep edge reservations in sync before opening (best-effort)
+    try:
+        sync_desired_sticky_servers()
+    except Exception as e:
+        warn(f"[tunnel] warning: could not sync reservations: {e}")
+
+    info(f"Running {edition} server: {platform}-{version}-{name} with {ram}MB RAM and EULA accepted: {eula}")
+
+    server_dir = str(servers_dir() / str(folder))
+
+    if not os.path.isdir(server_dir):
+        error(f"Server folder missing: {server_dir}")
+        return
+
+    # Ensure ports are valid and configs are consistent
+    try:
+        java_port, bedrock_port, voice_local_port = ensure_ports(server_config=server_config, server_dir=server_dir)
+    except Exception as e:
+        error(f"Port validation failed: {e}")
+        return
+
+    # Process handles
+    proc: Optional[subprocess.Popen] = None
+
+    # Runtime state
+    max_players = _read_max_players_from_properties(server_dir)
+
+    state: Dict[str, Any] = {
+        "server_id": server_id,
+        "platform": platform,
+        "version": version,
+        "name": name,
+        "folder": folder,
+        "server_dir": server_dir,
+        "edition": edition,
+        "state": "starting",
+        "manager_pid": os.getpid(),
+        "server_pid": None,
+        "java_port": java_port,
+        "bedrock_port": bedrock_port,
+        "voice_port": voice_local_port,
+        "tunneling": tunneling,
+        "sticky_address": sticky_address,
+        "started_at": time.time(),
+        "max_players": max_players,
+        "players_online": 0,
+        "cpu_history": [],
+        "ram_max_mb": ram if isinstance(ram, int) else None,
+        "ram_used_mb": None,
+        "ram_process_mb": None,
+    }
+    recorder.write_state(state)
+    _emit_state(
+        server_id=server_id,
+        state="starting",
+        **{k: v for k, v in state.items() if k not in ("state", "server_id")},
+    )
+
+
+    stop_evt = threading.Event()
+
+    tunnel_started = False
+    tunnel_info = None
+
+    # Track readiness
+    tcp_ready_once = False
+    udp_ready_once = False
+
+    try:
+        # ---- Start tunnel first for Java/both (so voice_host can be written before load) ----
+        if tunneling and edition in ("java", "both"):
+            services: List[Dict[str, Any]] = [{"svc": "mc", "proto": "tcp", "local": int(java_port)}]
+
+            if voice_local_port is not None:
+                services.append({"svc": "voice", "proto": "udp", "local": int(voice_local_port)})
+
+            if edition == "both":
+                services.append({"svc": "bedrock", "proto": "udp", "local": int(bedrock_port)})
+
+            try:
+                tunnel_info = TUNNEL.start(server_id=server_id, sticky_address=sticky_address, services=services, share_game_port=edition == "both")
+                tunnel_started = True
+
+                # Configure Simple Voice Chat advertised host/port
+                if voice_local_port is not None and tunnel_info:
+                    voice_pub = tunnel_info.public_port("voice")
+                    if voice_pub:
+                        public_host = f"{tunnel_info.subdomain}.{tunnel_info.domain_suffix}:{voice_pub}"
+                        try:
+                            _ensure_voicechat_config(
+                                server_dir=server_dir,
+                                platform=platform,
+                                voice_local_port=int(voice_local_port),
+                                public_host=public_host,
+                            )
+                        except Exception as e:
+                            warn(f"[voicechat] warning: could not write voice chat config: {e}")
+
+            except Exception as e:
+                warn(f"[tunnel] failed to start (continuing without tunnel): {e}")
+
+
+
+        # ---- Orphan cleanup: if a prior session crashed and the server is still bound, stop it ----
+        try:
+            if edition in ("java", "both") and int(java_port) > 0:
+                orphan_pid = _pid_listening_on_tcp_port(int(java_port))
+                if orphan_pid and orphan_pid > 0:
+                    warn(f"[runtime] Detected process {orphan_pid} already listening on :{java_port}. Attempting to stop it (likely orphaned from a prior crash).")
+                    _terminate_pid(orphan_pid, timeout_s=8.0)
+        except Exception:
+            pass
+        # ---- Start the server process ----
+        popen_kw = _make_popen_kwargs()
+
+        if edition in ("java", "both"):
+            if platform in ["forge", "neoforge"]:
+                run_script = "run.bat" if os.name == "nt" else "run.sh"
+                run_script_path = os.path.join(server_dir, run_script)
+
+                if os.path.exists(run_script_path):
+                    info(f"Using {platform.capitalize()} {run_script} script...")
+
+                    # Update user_jvm_args.txt with correct RAM settings (best-effort)
+                    user_jvm_args = os.path.join(server_dir, "user_jvm_args.txt")
+                    if os.path.exists(user_jvm_args) and isinstance(ram, int):
+                        import re
+
+                        with open(user_jvm_args, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+
+                        content = re.sub(r"-Xmx\d+[GMm]", f"-Xmx{ram}M", content)
+                        content = re.sub(r"-Xms\d+[GMm]", f"-Xms{ram}M", content)
+
+                        content = content.replace("# -Xmx", "-Xmx").replace("# -Xms", "-Xms")
+
+                        with open(user_jvm_args, "w", encoding="utf-8") as f:
+                            f.write(content)
+
+                    if os.name == "nt":
+                        proc = subprocess.Popen(["cmd", "/c", "run.bat", "nogui"], cwd=server_dir, **popen_kw)
+                    else:
+                        proc = subprocess.Popen(["sh", "run.sh", "nogui"], cwd=server_dir, **popen_kw)
+                else:
+                    warn(f"{run_script} not found, falling back to direct JAR execution...")
+                    java_cmd = _find_java_cmd(server_dir)
+                    jar = f"{platform}-{version}.jar"
+                    proc = subprocess.Popen(
+                        [java_cmd, f"-Xmx{ram}M", f"-Xms{ram}M", "-jar", jar, "nogui"],
+                        cwd=server_dir,
+                        **popen_kw,
+                    )
+            else:
+                java_cmd = _find_java_cmd(server_dir)
+                jar = f"{platform}-{version}.jar"
+                proc = subprocess.Popen(
+                    [
+                        java_cmd,
+                        f"-Xmx{ram}M",
+                        f"-Xms{ram}M",
+                        "-XX:+UseG1GC",
+                        "-XX:+ParallelRefProcEnabled",
+                        "-XX:MaxGCPauseMillis=200",
+                        "-XX:+UnlockExperimentalVMOptions",
+                        "-XX:+DisableExplicitGC",
+                        "-XX:+AlwaysPreTouch",
+                        "-XX:G1NewSizePercent=30",
+                        "-XX:G1MaxNewSizePercent=40",
+                        "-XX:G1HeapRegionSize=8M",
+                        "-XX:G1ReservePercent=20",
+                        "-XX:G1HeapWastePercent=5",
+                        "-XX:G1MixedGCCountTarget=4",
+                        "-XX:InitiatingHeapOccupancyPercent=15",
+                        "-XX:G1MixedGCLiveThresholdPercent=90",
+                        "-XX:G1RSetUpdatingPauseTimePercent=5",
+                        "-XX:SurvivorRatio=32",
+                        "-XX:+PerfDisableSharedMem",
+                        "-XX:MaxTenuringThreshold=1",
+                        "-Daikars.new.flags=true",
+                        "-Dusing.aikars.flags=https://mcutils.com",
+                        "-jar",
+                        jar,
+                        "--nogui",
+                    ],
+                    cwd=server_dir,
+                    **popen_kw,
+                )
+
+        elif edition == "bedrock":
+            exe = os.path.join(server_dir, "bedrock_server.exe")
+            proc = subprocess.Popen([exe], cwd=server_dir, **popen_kw)
+
+        else:
+            raise ValueError("edition must be 'java', 'bedrock', or 'both'")
+
+        assert proc is not None
+
+        # Update runtime state with PIDs
+        state["server_pid"] = int(proc.pid)
+        state["state"] = "running"
+        recorder.write_state(state)
+
+        # Start piping
+        threading.Thread(target=_pump_stdout, args=(proc,), kwargs={"server_id": server_id, "recorder": recorder, "state": state, "stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_pump_stdin_from_parent, args=(proc,), kwargs={"stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_pump_control_file, args=(proc,), kwargs={"control_path": recorder.control_path, "stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_metrics_loop, kwargs={"state": state, "recorder": recorder, "stop_evt": stop_evt}, daemon=True).start()
+        threading.Thread(target=_status_poll_loop, kwargs={"state": state, "recorder": recorder, "stop_evt": stop_evt}, daemon=True).start()
 
         # ---- Readiness + tunnel (bedrock-only starts tunnel after readiness) ----
         if edition == "java":

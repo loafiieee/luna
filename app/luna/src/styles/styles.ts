@@ -483,17 +483,6 @@ export const styles: Record<string, React.CSSProperties> = {
     height: "calc(100% - 16px)",
   },
 
-  perfDot: {
-    position: "absolute",
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-    background: "rgba(125,211,252,.95)",
-    boxShadow: "0 0 0 2px rgba(2,6,23,.8)",
-    transform: "translate(-50%, -50%)",
-    zIndex: 2,
-  },
-
   perfGuide: {
     position: "absolute",
     left: 8,

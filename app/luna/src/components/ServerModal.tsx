@@ -847,30 +847,11 @@ function DetailsPane({ server }: { server: ServerInfo }) {
             {[25, 50, 75].map((level) => (
               <div key={level} style={{ ...styles.perfGuide, top: `${100 - level}%` }} />
             ))}
-            {perfSamples.map((sample, idx) => {
-              const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-              const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
-              return (
-                <div
-                  key={idx}
-                  style={{
-                    ...styles.perfDot,
-                    left: `${x}%`,
-                    top: `${y}%`,
-                  }}
-                  title={`${sample.toFixed(0)} MB`}
-                />
-              );
-            })}
             <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={styles.perfLineSvg}>
             <defs>
               <linearGradient id="perf-line" x1="0" y1="0" x2="1" y2="0">
                 <stop offset="0%" stopColor="rgba(56,189,248,0.95)" />
                 <stop offset="100%" stopColor="rgba(192,132,252,0.95)" />
-              </linearGradient>
-              <linearGradient id="perf-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgba(56,189,248,0.25)" />
-                <stop offset="100%" stopColor="rgba(56,189,248,0.02)" />
               </linearGradient>
             </defs>
             <polyline
@@ -883,19 +864,9 @@ function DetailsPane({ server }: { server: ServerInfo }) {
                 .join(" ")}
               fill="none"
               stroke="url(#perf-line)"
-              strokeWidth="1.8"
+              strokeWidth="2"
               strokeLinejoin="round"
               strokeLinecap="round"
-            />
-            <polygon
-              points={`0,100 ${perfSamples
-                .map((sample, idx) => {
-                  const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-                  const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
-                  return `${x},${y}`;
-                })
-                .join(" ")} 100,100`}
-              fill="url(#perf-fill)"
             />
             </svg>
           </div>

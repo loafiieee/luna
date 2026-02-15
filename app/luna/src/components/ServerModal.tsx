@@ -61,6 +61,11 @@ export function ServerModal({
   const [playerActionMenu, setPlayerActionMenu] = useState<{ name: string; x: number; y: number } | null>(null);
   const [confirmPlayerAction, setConfirmPlayerAction] = useState<{ action: "ban" | "op" | "deop" | "kick"; name: string } | null>(null);
   const [playerActionBusy, setPlayerActionBusy] = useState(false);
+  const [banManagerOpen, setBanManagerOpen] = useState(false);
+  const [banManagerLoading, setBanManagerLoading] = useState(false);
+  const [bannedPlayers, setBannedPlayers] = useState<string[]>([]);
+  const [bannedIps, setBannedIps] = useState<string[]>([]);
+  const [banSearch, setBanSearch] = useState("");
 
   const players: Array<{ name: string; head_url?: string }> = useMemo(() => playersList(server), [server]);
 
@@ -73,6 +78,13 @@ export function ServerModal({
   useEffect(() => {
     setNameDraft(server.name);
   }, [server.name]);
+
+  useEffect(() => {
+    setBanManagerOpen(false);
+    setBanSearch("");
+    setBannedPlayers([]);
+    setBannedIps([]);
+  }, [server.server_id]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -142,6 +154,40 @@ async function runPlayerCommand(action: "ban" | "op" | "deop" | "kick" | "copy",
     setPlayerActionBusy(false);
     setPlayerActionMenu(null);
   }
+}
+
+async function refreshBans() {
+    if (!server.server_dir) {
+      setBannedPlayers([]);
+      setBannedIps([]);
+      return;
+    }
+    try {
+      setBanManagerLoading(true);
+      const res = await invoke<{ banned_players: string[]; banned_ips: string[] }>("read_server_bans", {
+        serverDir: server.server_dir,
+      });
+      setBannedPlayers(Array.isArray(res?.banned_players) ? res.banned_players : []);
+      setBannedIps(Array.isArray(res?.banned_ips) ? res.banned_ips : []);
+    } catch (e: any) {
+      addLog("err", `Could not load ban lists: ${String(e)}`);
+    } finally {
+      setBanManagerLoading(false);
+    }
+}
+
+async function unbanEntry(kind: "player" | "ip", value: string) {
+    const cmd = kind === "player" ? `pardon ${value}` : `pardon-ip ${value}`;
+    try {
+      setPlayerActionBusy(true);
+      await invoke("send_server_console_command", { serverId: server.server_id, command: cmd });
+      addLog("ok", `Sent "${cmd}".`);
+      await refreshBans();
+    } catch (e: any) {
+      addLog("err", `Failed to send "${cmd}": ${String(e)}`);
+    } finally {
+      setPlayerActionBusy(false);
+    }
 }
 
 async function copyAddress() {
@@ -291,7 +337,55 @@ async function copyAddress() {
           />
 
           <div style={styles.playersList}>
-            {!isOnline ? (
+            {banManagerOpen ? (
+              <div style={styles.banManagerWrap}>
+                <div style={styles.banManagerHead}>
+                  <div style={{ fontWeight: 900 }}>Ban Manager</div>
+                  <button
+                    type="button"
+                    style={btn("ghost")}
+                    onClick={() => setBanManagerOpen(false)}
+                    title="Close ban manager"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <input
+                  style={styles.search}
+                  placeholder="Search banned players or IPs…"
+                  value={banSearch}
+                  onChange={(e) => setBanSearch(e.target.value)}
+                />
+
+                <button
+                  type="button"
+                  style={btn("ghost")}
+                  onClick={refreshBans}
+                  disabled={banManagerLoading || playerActionBusy}
+                >
+                  {banManagerLoading ? "Refreshing…" : "Refresh bans"}
+                </button>
+
+                <BanSection
+                  title="Banned players"
+                  emptyLabel="No banned players."
+                  entries={bannedPlayers.filter((x) => x.toLowerCase().includes(banSearch.trim().toLowerCase()))}
+                  actionLabel="Unban"
+                  disabled={playerActionBusy}
+                  onAction={(entry) => unbanEntry("player", entry)}
+                />
+
+                <BanSection
+                  title="Banned IPs"
+                  emptyLabel="No banned IPs."
+                  entries={bannedIps.filter((x) => x.toLowerCase().includes(banSearch.trim().toLowerCase()))}
+                  actionLabel="Unban IP"
+                  disabled={playerActionBusy}
+                  onAction={(entry) => unbanEntry("ip", entry)}
+                />
+              </div>
+            ) : !isOnline ? (
               <div style={styles.playersEmpty}>Server is offline.</div>
             ) : filteredPlayers.length === 0 ? (
               typeof onlinePlayers === "number" && onlinePlayers > 0 ? (
@@ -313,11 +407,86 @@ async function copyAddress() {
               ))
             )}
           </div>
-          <div style={{ marginTop: 8, opacity: 0.65, fontWeight: 800, fontSize: 12 }}>
-            Bans manager (coming soon). For now, use <span style={{ fontFamily: "monospace" }}>pardon &lt;name&gt;</span> in Console.
-          </div>
+
+          <button
+            type="button"
+            style={styles.banManagerToggle}
+            onClick={() => {
+              const next = !banManagerOpen;
+              setBanManagerOpen(next);
+              if (next) void refreshBans();
+            }}
+          >
+            {banManagerOpen ? "Hide Ban Manager" : "Open Ban Manager"}
+          </button>
         </div>
       </div>
+
+      {playerActionMenu && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 65,
+          }}
+          onClick={() => setPlayerActionMenu(null)}
+        >
+          <div
+            style={{
+              position: "fixed",
+              left: Math.max(8, playerActionMenu.x - 180),
+              top: Math.max(8, playerActionMenu.y + 8),
+              width: 180,
+              padding: 8,
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,.12)",
+              background: "rgba(7,12,24,.98)",
+              boxShadow: "0 12px 30px rgba(0,0,0,.5)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: "4px 8px", opacity: 0.65, fontSize: 12, fontWeight: 800 }}>
+              {playerActionMenu.name}
+            </div>
+            <MenuItem label="Copy username" onClick={() => runPlayerCommand("copy", playerActionMenu.name)} disabled={playerActionBusy} />
+            <MenuItem label="Kick" onClick={() => setConfirmPlayerAction({ action: "kick", name: playerActionMenu.name })} disabled={playerActionBusy} />
+            <MenuItem label="Ban" onClick={() => setConfirmPlayerAction({ action: "ban", name: playerActionMenu.name })} disabled={playerActionBusy} />
+            <MenuItem label="Op" onClick={() => runPlayerCommand("op", playerActionMenu.name)} disabled={playerActionBusy} />
+            <MenuItem label="Deop" onClick={() => runPlayerCommand("deop", playerActionMenu.name)} disabled={playerActionBusy} />
+          </div>
+        </div>
+      )}
+
+      {confirmPlayerAction && (
+        <div style={styles.confirmOverlay}>
+          <div style={styles.confirmCard}>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>Confirm {confirmPlayerAction.action}</div>
+            <div style={{ marginTop: 8, opacity: 0.78, lineHeight: 1.4 }}>
+              {confirmPlayerAction.action === "ban" ? "Ban" : "Kick"} <b>{confirmPlayerAction.name}</b>?
+            </div>
+            <div style={styles.confirmActions}>
+              <button type="button" style={btn("ghost")} onClick={() => setConfirmPlayerAction(null)} disabled={playerActionBusy}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                style={btn(confirmPlayerAction.action === "ban" ? "danger" : "primary")}
+                onClick={async () => {
+                  const { action, name } = confirmPlayerAction;
+                  setConfirmPlayerAction(null);
+                  await runPlayerCommand(action, name);
+                  if (action === "ban" && banManagerOpen) {
+                    await refreshBans();
+                  }
+                }}
+                disabled={playerActionBusy}
+              >
+                {playerActionBusy ? "Sending…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmDeleteOpen && (
         <div style={styles.confirmOverlay}>
@@ -346,6 +515,40 @@ async function copyAddress() {
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function BanSection({
+  title,
+  entries,
+  emptyLabel,
+  actionLabel,
+  disabled,
+  onAction,
+}: {
+  title: string;
+  entries: string[];
+  emptyLabel: string;
+  actionLabel: string;
+  disabled: boolean;
+  onAction: (entry: string) => void;
+}) {
+  return (
+    <div style={styles.banSection}>
+      <div style={styles.banSectionTitle}>{title}</div>
+      {entries.length === 0 ? (
+        <div style={styles.playersEmpty}>{emptyLabel}</div>
+      ) : (
+        entries.map((entry) => (
+          <div key={`${title}-${entry}`} style={styles.banRow}>
+            <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis" }}>{entry}</div>
+            <button type="button" style={btn("ghost")} onClick={() => onAction(entry)} disabled={disabled}>
+              {actionLabel}
+            </button>
+          </div>
+        ))
       )}
     </div>
   );
@@ -629,11 +832,57 @@ function DetailsPane({ server }: { server: ServerInfo }) {
       <div style={{ marginTop: 14 }}>
         <div style={styles.smallLabel}>Performance graph</div>
         <div style={styles.perfGraph}>
-          {perfSamples.map((sample, idx) => (
-            <div key={idx} style={styles.perfBarWrap}>
-              <div style={{ ...styles.perfBar, height: `${Math.max(4, Math.min(100, sample))}%` }} />
-            </div>
-          ))}
+          {perfSamples.map((sample, idx) => {
+            const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
+            const y = 100 - Math.max(0, Math.min(100, sample));
+            return (
+              <div
+                key={idx}
+                style={{
+                  ...styles.perfDot,
+                  left: `${x}%`,
+                  top: `${y}%`,
+                }}
+                title={`${sample.toFixed(1)}%`}
+              />
+            );
+          })}
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={styles.perfLineSvg}>
+            <defs>
+              <linearGradient id="perf-line" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="rgba(56,189,248,0.95)" />
+                <stop offset="100%" stopColor="rgba(192,132,252,0.95)" />
+              </linearGradient>
+              <linearGradient id="perf-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="rgba(56,189,248,0.25)" />
+                <stop offset="100%" stopColor="rgba(56,189,248,0.02)" />
+              </linearGradient>
+            </defs>
+            <polyline
+              points={perfSamples
+                .map((sample, idx) => {
+                  const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
+                  const y = 100 - Math.max(0, Math.min(100, sample));
+                  return `${x},${y}`;
+                })
+                .join(" ")}
+              fill="none"
+              stroke="url(#perf-line)"
+              strokeWidth="1.8"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+            <polygon
+              points={`0,100 ${perfSamples
+                .map((sample, idx) => {
+                  const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
+                  const y = 100 - Math.max(0, Math.min(100, sample));
+                  return `${x},${y}`;
+                })
+                .join(" ")} 100,100`}
+              fill="url(#perf-fill)"
+            />
+          </svg>
         </div>
       </div>
 
@@ -783,7 +1032,14 @@ function buildPerfSamples(rt: any): number[] {
   for (const c of candidates) {
     if (!Array.isArray(c)) continue;
     const nums = c.filter((n: any) => typeof n === "number" && Number.isFinite(n)).slice(-24);
-    if (nums.length > 0) return nums.map((n: number) => Math.max(0, Math.min(100, n)));
+    if (nums.length > 0) {
+      const clipped = nums.map((n: number) => Math.max(0, Math.min(100, n)));
+      return clipped.map((n, i, arr) => {
+        const prev = arr[i - 1] ?? n;
+        const next = arr[i + 1] ?? n;
+        return (prev + n + next) / 3;
+      });
+    }
   }
   return new Array(24).fill(0);
 }

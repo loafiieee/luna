@@ -447,8 +447,26 @@ export const styles: Record<string, React.CSSProperties> = {
     marginTop: 12,
   },
 
+  perfGraphWrap: {
+    display: "grid",
+    gridTemplateColumns: "44px minmax(0, 1fr)",
+    alignItems: "stretch",
+    gap: 8,
+    marginTop: 6,
+  },
+
+  perfYAxis: {
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    fontSize: 11,
+    opacity: 0.62,
+    fontWeight: 800,
+    padding: "8px 0",
+    textAlign: "right",
+  },
+
   perfGraph: {
-    marginTop: 8,
     height: 110,
     position: "relative",
     overflow: "hidden",
@@ -474,6 +492,38 @@ export const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 0 0 2px rgba(2,6,23,.8)",
     transform: "translate(-50%, -50%)",
     zIndex: 2,
+  },
+
+  perfGuide: {
+    position: "absolute",
+    left: 8,
+    right: 8,
+    borderTop: "1px dashed rgba(255,255,255,.14)",
+    pointerEvents: "none",
+  },
+
+  perfStatsRow: {
+    marginTop: 8,
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+
+  perfStatPill: {
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.05)",
+    borderRadius: 999,
+    padding: "4px 9px",
+    fontSize: 11,
+    fontWeight: 900,
+    color: "rgba(224,242,254,.94)",
+  },
+
+  perfMeta: {
+    marginTop: 6,
+    fontSize: 11,
+    opacity: 0.62,
+    fontWeight: 700,
   },
 
   banManagerToggle: {

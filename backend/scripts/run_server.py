@@ -1371,6 +1371,16 @@ def _metrics_loop(*, state: Dict[str, Any], recorder: RuntimeRecorder, stop_evt:
             if len(hist) > 24:
                 hist = hist[-24:]
             state["cpu_history"] = hist
+
+            ram_hist = state.get("ram_used_history")
+            if not isinstance(ram_hist, list):
+                ram_hist = []
+            ram_sample = heap_used if heap_used is not None else proc_ram
+            if ram_sample is not None:
+                ram_hist.append(float(ram_sample))
+            if len(ram_hist) > 24:
+                ram_hist = ram_hist[-24:]
+            state["ram_used_history"] = ram_hist
             state["metrics_updated_at"] = time.time()
             recorder.write_state(state)
         except Exception:
@@ -1747,6 +1757,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
         "max_players": max_players,
         "players_online": 0,
         "cpu_history": [],
+        "ram_used_history": [],
         "ram_max_mb": ram if isinstance(ram, int) else None,
         "ram_used_mb": None,
         "ram_process_mb": None,
@@ -2297,6 +2308,7 @@ def run_server(edition: str, platform: str, version: str, name: str):
         "max_players": max_players,
         "players_online": 0,
         "cpu_history": [],
+        "ram_used_history": [],
         "ram_max_mb": ram if isinstance(ram, int) else None,
         "ram_used_mb": None,
         "ram_process_mb": None,

@@ -447,30 +447,123 @@ export const styles: Record<string, React.CSSProperties> = {
     marginTop: 12,
   },
 
+  perfGraphWrap: {
+    display: "grid",
+    gridTemplateColumns: "44px minmax(0, 1fr)",
+    alignItems: "stretch",
+    gap: 8,
+    marginTop: 6,
+  },
+
+  perfYAxis: {
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    fontSize: 11,
+    opacity: 0.62,
+    fontWeight: 800,
+    padding: "8px 0",
+    textAlign: "right",
+  },
+
   perfGraph: {
-    marginTop: 8,
     height: 110,
+    position: "relative",
+    overflow: "hidden",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.08)",
-    background: "rgba(255,255,255,.03)",
-    display: "grid",
-    gridTemplateColumns: "repeat(24, 1fr)",
-    alignItems: "end",
-    gap: 4,
+    background: "linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02))",
     padding: 8,
   },
 
-  perfBarWrap: {
-    height: "100%",
-    display: "flex",
-    alignItems: "end",
+  perfLineSvg: {
+    position: "absolute",
+    inset: 8,
+    width: "calc(100% - 16px)",
+    height: "calc(100% - 16px)",
   },
 
-  perfBar: {
+  perfGuide: {
+    position: "absolute",
+    left: 8,
+    right: 8,
+    borderTop: "1px dashed rgba(255,255,255,.14)",
+    pointerEvents: "none",
+  },
+
+  perfStatsRow: {
+    marginTop: 8,
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+
+  perfStatPill: {
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.05)",
+    borderRadius: 999,
+    padding: "4px 9px",
+    fontSize: 11,
+    fontWeight: 900,
+    color: "rgba(224,242,254,.94)",
+  },
+
+  perfMeta: {
+    marginTop: 6,
+    fontSize: 11,
+    opacity: 0.62,
+    fontWeight: 700,
+  },
+
+  banManagerToggle: {
     width: "100%",
-    borderRadius: 4,
-    background: "linear-gradient(180deg, rgba(59,130,246,.95), rgba(168,85,247,.9))",
-    minHeight: 4,
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(125,211,252,.35)",
+    background: "rgba(56,189,248,.14)",
+    color: "rgba(224,242,254,.95)",
+    fontWeight: 900,
+    cursor: "pointer",
+    marginTop: 8,
+  },
+
+  banManagerWrap: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+
+  banManagerHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+
+  banSection: {
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: 12,
+    padding: 8,
+    background: "rgba(255,255,255,.04)",
+  },
+
+  banSectionTitle: {
+    fontWeight: 900,
+    opacity: 0.8,
+    fontSize: 12,
+    marginBottom: 8,
+  },
+
+  banRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "6px 8px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,.08)",
+    background: "rgba(255,255,255,.03)",
+    marginBottom: 6,
   },
 
   kvGrid: {

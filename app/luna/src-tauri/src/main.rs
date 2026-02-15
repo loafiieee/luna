@@ -62,6 +62,12 @@ struct PtyStatusResult {
     running: bool,
 }
 
+#[derive(Serialize)]
+struct ServerBansResult {
+    banned_players: Vec<String>,
+    banned_ips: Vec<String>,
+}
+
 struct PtySession {
     child: Box<dyn Child + Send>,
     master: Box<dyn MasterPty + Send>,
@@ -480,6 +486,42 @@ fn send_server_console_command(server_id: String, command: String) -> Result<(),
     Ok(())
 }
 
+#[tauri::command]
+fn read_server_bans(server_dir: String) -> Result<ServerBansResult, String> {
+    fn read_entries(path: PathBuf, field: &str) -> Vec<String> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let parsed = match serde_json::from_str::<Value>(&raw) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut entries: Vec<String> = parsed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get(field).and_then(|v| v.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        entries.sort_by_key(|s| s.to_lowercase());
+        entries.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        entries
+    }
+
+    let dir = PathBuf::from(server_dir);
+    let banned_players = read_entries(dir.join("banned-players.json"), "name");
+    let banned_ips = read_entries(dir.join("banned-ips.json"), "ip");
+
+    Ok(ServerBansResult {
+        banned_players,
+        banned_ips,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -491,7 +533,8 @@ fn main() {
             pty_status,
             pty_stop,
             read_server_console,
-            send_server_console_command
+            send_server_console_command,
+            read_server_bans
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

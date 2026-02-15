@@ -1060,7 +1060,14 @@ function buildPerfSamples(rt: any): number[] {
   for (const c of candidates) {
     if (!Array.isArray(c)) continue;
     const nums = c.filter((n: any) => typeof n === "number" && Number.isFinite(n)).slice(-24);
-    if (nums.length > 0) return nums.map((n: number) => Math.max(0, Math.min(100, n)));
+    if (nums.length > 0) {
+      const clipped = nums.map((n: number) => Math.max(0, Math.min(100, n)));
+      return clipped.map((n, i, arr) => {
+        const prev = arr[i - 1] ?? n;
+        const next = arr[i + 1] ?? n;
+        return (prev + n + next) / 3;
+      });
+    }
   }
   return new Array(24).fill(0);
 }

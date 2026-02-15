@@ -487,6 +487,15 @@ export const styles: Record<string, React.CSSProperties> = {
     paddingRight: 4,
   },
 
+  contentItemBtn: {
+    border: "none",
+    background: "transparent",
+    padding: 0,
+    margin: 0,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+
   contentItem: {
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,.12)",
@@ -496,6 +505,31 @@ export const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     gap: 10,
     alignItems: "flex-start",
+  },
+
+  contentThumbWrap: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+    overflow: "hidden",
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.04)",
+    flexShrink: 0,
+  },
+
+  contentThumb: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+  },
+
+  contentThumbPlaceholder: {
+    width: "100%",
+    height: "100%",
+    display: "grid",
+    placeItems: "center",
+    fontWeight: 900,
+    opacity: 0.7,
   },
 
   contentItemTitle: {
@@ -518,6 +552,56 @@ export const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     opacity: 0.84,
     lineHeight: 1.35,
+  },
+
+
+  contentOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,.55)",
+    zIndex: 90,
+    display: "grid",
+    placeItems: "center",
+    padding: 20,
+  },
+
+  contentModal: {
+    width: "min(760px, 100%)",
+    maxHeight: "85vh",
+    overflow: "auto",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(10,14,26,.98)",
+    boxShadow: "0 30px 80px rgba(0,0,0,.55)",
+  },
+
+  contentModalHead: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: 12,
+    borderBottom: "1px solid rgba(255,255,255,.08)",
+  },
+
+  contentModalBody: {
+    padding: 12,
+    display: "grid",
+    gap: 8,
+  },
+
+  contentModalImage: {
+    width: 96,
+    height: 96,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.12)",
+    objectFit: "cover",
+  },
+
+  contentModalActions: {
+    padding: 12,
+    borderTop: "1px solid rgba(255,255,255,.08)",
+    display: "flex",
+    justifyContent: "flex-end",
   },
 
   detailsMetricsGrid: {

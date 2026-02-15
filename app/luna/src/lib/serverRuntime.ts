@@ -49,6 +49,9 @@ function hasLiveRuntimeSignal(rt: any): boolean {
     rt?.cpu_usage,
     rt?.ram_mb,
     rt?.memory_mb,
+    rt?.ram_used_mb,
+    rt?.heap_used_mb,
+    rt?.ram_process_mb,
   ];
 
   for (const value of numericSignals) {
@@ -57,20 +60,29 @@ function hasLiveRuntimeSignal(rt: any): boolean {
   }
 
   const playerSample = rt?.players_list ?? rt?.online_players_list ?? rt?.players?.sample ?? rt?.query?.players;
-  return Array.isArray(playerSample) && playerSample.length > 0;
+  if (Array.isArray(playerSample) && playerSample.length > 0) return true;
+
+  const perfHistorySample = rt?.ram_used_history ?? rt?.cpu_history ?? rt?.metrics?.ram_used ?? rt?.metrics?.cpu;
+  return Array.isArray(perfHistorySample) && perfHistorySample.length > 0;
 }
 
 export function isServerOnline(server: ServerInfo): boolean {
   const rt: any = server.runtime ?? {};
   const state = String(rt.state ?? rt.status ?? "").toLowerCase();
+  const hasLiveSignal = hasLiveRuntimeSignal(rt);
+
   if (["running", "starting", "online", "up", "started", "alive", "ready"].includes(state)) return true;
+
+  // Prefer concrete process/runtime signals over potentially stale state labels.
+  if (typeof server.pid === "number" && server.pid > 0) return true;
+  if (hasLiveSignal) return true;
+  if (server.running === true) return true;
+
   if (["stopped", "stopping", "offline", "down", "error", "crashed", "dead", "exited"].includes(state)) return false;
 
   if (typeof server.running === "boolean") return server.running;
 
-  if (typeof server.pid === "number" && server.pid > 0) return true;
-
-  return hasLiveRuntimeSignal(rt);
+  return false;
 }
 
 export function serverIconUrl(server: ServerInfo): string | null {

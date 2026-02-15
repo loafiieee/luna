@@ -1085,6 +1085,7 @@ type ModrinthHit = {
   author?: string;
   versions?: string[];
   categories?: string[];
+  display_categories?: string[];
   downloads?: number;
   icon_url?: string;
   client_side?: string;
@@ -1117,9 +1118,31 @@ function modrinthLoaderForServer(server: ServerInfo, projectType: "plugin" | "mo
   return null;
 }
 
+const MODRINTH_LOADER_TAGS = new Set([
+  "paper",
+  "folia",
+  "spigot",
+  "bukkit",
+  "purpur",
+  "pufferfish",
+  "sponge",
+  "velocity",
+  "bungeecord",
+  "waterfall",
+  "fabric",
+  "quilt",
+  "forge",
+  "neoforge",
+]);
+
 function normalizeCategories(hit: ModrinthHit): string[] {
-  const cats = Array.isArray(hit.categories) ? hit.categories : [];
-  return cats.filter((c): c is string => typeof c === "string" && c.trim().length > 0);
+  const preferred = Array.isArray(hit.display_categories) && hit.display_categories.length > 0 ? hit.display_categories : hit.categories;
+  const cats = Array.isArray(preferred) ? preferred : [];
+  return cats
+    .filter((c): c is string => typeof c === "string" && c.trim().length > 0)
+    .map((c) => c.trim())
+    .filter((c) => !MODRINTH_LOADER_TAGS.has(c.toLowerCase()))
+    .filter((c) => !/^\d+(?:\.\d+){1,3}$/.test(c));
 }
 
 function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
@@ -1164,7 +1187,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
   async function runSearch(searchText: string) {
     const trimmed = searchText.trim();
-    const effectiveQuery = trimmed || activeProjectType;
+    const effectiveQuery = trimmed;
 
     try {
       setLoading(true);
@@ -1251,7 +1274,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
       <div style={styles.contentSearchRow}>
         <select
-          style={styles.search}
+          style={styles.contentSelect}
           value={selectedCategory}
           onChange={(e) => setSelectedCategory(e.target.value)}
         >
@@ -1306,7 +1329,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
               <div style={styles.contentItemMeta}>Author: {selectedItem.author ?? "unknown"}</div>
               <div style={styles.contentItemMeta}>Downloads: {Number(selectedItem.downloads ?? 0).toLocaleString()}</div>
               <div style={styles.contentItemMeta}>Categories: {normalizeCategories(selectedItem).join(", ") || "—"}</div>
-              <div style={styles.contentItemMeta}>Versions: {Array.isArray(selectedItem.versions) ? selectedItem.versions.slice(0, 8).join(", ") : "—"}</div>
+              <div style={styles.contentItemMeta}>Versions: {Array.isArray(selectedItem.versions) ? selectedItem.versions.join(", ") : "—"}</div>
             </div>
             <div style={styles.contentModalActions}>
               <button

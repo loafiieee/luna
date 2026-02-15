@@ -1079,12 +1079,17 @@ type ContentTabKey = "primary" | "datapack";
 
 type ModrinthHit = {
   project_id: string;
+  slug?: string;
   title?: string;
   description?: string;
   author?: string;
   versions?: string[];
   categories?: string[];
   downloads?: number;
+  icon_url?: string;
+  client_side?: string;
+  server_side?: string;
+  project_type?: string;
 };
 
 function primaryContentTypeForServer(server: ServerInfo): "plugin" | "mod" {
@@ -1112,54 +1117,64 @@ function modrinthLoaderForServer(server: ServerInfo, projectType: "plugin" | "mo
   return null;
 }
 
+function normalizeCategories(hit: ModrinthHit): string[] {
+  const cats = Array.isArray(hit.categories) ? hit.categories : [];
+  return cats.filter((c): c is string => typeof c === "string" && c.trim().length > 0);
+}
+
 function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
   const primaryType = primaryContentTypeForServer(server);
   const primaryLabel = primaryType === "mod" ? "Mods" : "Plugins";
   const [tab, setTab] = useState<ContentTabKey>("primary");
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [items, setItems] = useState<ModrinthHit[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
-
-  useEffect(() => {
-    setItems([]);
-    setErr(null);
-    setQuery("");
-    setFilter("");
-  }, [tab, server.server_id]);
+  const [selectedItem, setSelectedItem] = useState<ModrinthHit | null>(null);
 
   const activeProjectType: "plugin" | "mod" | "datapack" = tab === "primary" ? primaryType : "datapack";
   const loader = modrinthLoaderForServer(server, activeProjectType);
   const gameVersion = typeof server.version === "string" && server.version.trim() ? server.version.trim() : null;
 
-  const shownItems = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((item) => {
-      const title = String(item.title ?? "").toLowerCase();
-      const desc = String(item.description ?? "").toLowerCase();
-      const author = String(item.author ?? "").toLowerCase();
-      return title.includes(q) || desc.includes(q) || author.includes(q);
-    });
-  }, [filter, items]);
+  useEffect(() => {
+    setItems([]);
+    setErr(null);
+    setQuery("");
+    setSelectedCategory("all");
+    setSelectedItem(null);
+  }, [tab, server.server_id]);
 
-  async function runSearch() {
-    const trimmed = query.trim();
-    if (!trimmed) {
-      setErr("Enter a search term.");
-      setItems([]);
-      return;
+  const categoryOptions = useMemo(() => {
+    const all = new Set<string>();
+    for (const item of items) {
+      for (const c of normalizeCategories(item)) all.add(c);
     }
+    return ["all", ...Array.from(all).sort((a, b) => a.localeCompare(b))];
+  }, [items]);
+
+  const shownItems = useMemo(() => {
+    let out = items;
+    if (selectedCategory !== "all") {
+      out = out.filter((item) => normalizeCategories(item).includes(selectedCategory));
+    }
+    return out;
+  }, [items, selectedCategory]);
+
+  async function runSearch(searchText: string) {
+    const trimmed = searchText.trim();
+    const effectiveQuery = trimmed || activeProjectType;
 
     try {
       setLoading(true);
       setErr(null);
 
-      const args = ["modrinth_search", trimmed, `--project_type=${activeProjectType}`];
+      const args = ["modrinth_search", effectiveQuery, `--project_type=${activeProjectType}`];
       if (loader) args.push(`--loader=${loader}`);
+      // Auto-filter by server MC version so only compatible content is shown.
       if (gameVersion) args.push(`--game_version=${gameVersion}`);
+      if (selectedCategory !== "all") args.push(`--category=${selectedCategory}`);
 
       const res = await cli<any>(...args);
       const hits = Array.isArray(res?.data?.hits) ? res.data.hits : [];
@@ -1174,6 +1189,17 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    void runSearch("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, server.server_id, activeProjectType]);
+
+  useEffect(() => {
+    if (selectedCategory === "all") return;
+    void runSearch(query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategory]);
 
   async function installProject(projectId: string) {
     if (!server.folder) {
@@ -1205,7 +1231,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "datapack" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("datapack")}>Datapacks</button>
       </div>
 
-      <div style={styles.contentMeta}>Searching Modrinth for {activeProjectType}s{loader ? ` • loader: ${loader}` : ""}{gameVersion ? ` • MC ${gameVersion}` : ""}</div>
+      <div style={styles.contentMeta}>Showing {activeProjectType}s relevant to this server{loader ? ` • loader: ${loader}` : ""}{gameVersion ? ` • MC ${gameVersion}` : ""}</div>
 
       <div style={styles.contentSearchRow}>
         <input
@@ -1216,42 +1242,85 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              runSearch();
+              runSearch(query);
             }
           }}
         />
-        <button type="button" style={btn("primary")} onClick={runSearch} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+        <button type="button" style={btn("primary")} onClick={() => runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
       </div>
 
       <div style={styles.contentSearchRow}>
-        <input style={styles.search} placeholder="Filter current results…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <select
+          style={styles.search}
+          value={selectedCategory}
+          onChange={(e) => setSelectedCategory(e.target.value)}
+        >
+          {categoryOptions.map((cat) => (
+            <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>
+          ))}
+        </select>
       </div>
 
       {err && <div style={styles.consoleError}>Search error: {err}</div>}
 
       <div style={styles.contentResults}>
         {shownItems.length === 0 ? (
-          <div style={styles.playersEmpty}>{query.trim() ? "No results found." : `Search for ${activeProjectType}s to get started.`}</div>
+          <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div>
         ) : (
           shownItems.map((item) => {
             const id = String(item.project_id ?? "");
             const title = item.title || id;
             const installing = installingId === id;
+            const icon = typeof item.icon_url === "string" ? item.icon_url : null;
             return (
-              <div key={id} style={styles.contentItem}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={styles.contentItemTitle}>{title}</div>
-                  <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
-                  <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
+              <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
+                <div style={styles.contentItem}>
+                  <div style={styles.contentThumbWrap}>
+                    {icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={styles.contentItemTitle}>{title}</div>
+                    <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
+                    <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
+                  </div>
+                  <button type="button" style={btn("primary")} onClick={(e) => { e.stopPropagation(); void installProject(id); }} disabled={installing || !id}>
+                    {installing ? "Installing…" : "Install"}
+                  </button>
                 </div>
-                <button type="button" style={btn("primary")} onClick={() => installProject(id)} disabled={installing || !id}>
-                  {installing ? "Installing…" : "Install"}
-                </button>
               </div>
             );
           })
         )}
       </div>
+
+      {selectedItem && (
+        <div style={styles.contentOverlay} onClick={() => setSelectedItem(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>{selectedItem.title ?? selectedItem.project_id}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setSelectedItem(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              {selectedItem.icon_url ? <img src={selectedItem.icon_url} alt="project" style={styles.contentModalImage} /> : null}
+              <div style={styles.contentItemDesc}>{selectedItem.description ?? "No description."}</div>
+              <div style={styles.contentItemMeta}>Author: {selectedItem.author ?? "unknown"}</div>
+              <div style={styles.contentItemMeta}>Downloads: {Number(selectedItem.downloads ?? 0).toLocaleString()}</div>
+              <div style={styles.contentItemMeta}>Categories: {normalizeCategories(selectedItem).join(", ") || "—"}</div>
+              <div style={styles.contentItemMeta}>Versions: {Array.isArray(selectedItem.versions) ? selectedItem.versions.slice(0, 8).join(", ") : "—"}</div>
+            </div>
+            <div style={styles.contentModalActions}>
+              <button
+                type="button"
+                style={btn("primary")}
+                onClick={() => void installProject(String(selectedItem.project_id ?? ""))}
+                disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id}
+              >
+                {installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

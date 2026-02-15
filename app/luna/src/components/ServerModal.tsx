@@ -94,6 +94,12 @@ export function ServerModal({
     return () => window.clearInterval(id);
   }, [onLiveRefresh]);
 
+  useEffect(() => {
+    if (!copiedAddress) return;
+    const id = window.setTimeout(() => setCopiedAddress(false), 1800);
+    return () => window.clearTimeout(id);
+  }, [copiedAddress]);
+
   async function submitRename() {
     const next = nameDraft.trim();
     if (!next || next === server.name) {
@@ -1149,6 +1155,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const primaryType = primaryContentTypeForServer(server);
   const primaryLabel = primaryType === "mod" ? "Mods" : "Plugins";
   const [tab, setTab] = useState<ContentTabKey>("primary");
+  const [mode, setMode] = useState<"discover" | "installed">("discover");
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [items, setItems] = useState<ModrinthHit[]>([]);
@@ -1156,6 +1163,9 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const [err, setErr] = useState<string | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<ModrinthHit | null>(null);
+  const [installedEntries, setInstalledEntries] = useState<Array<{ name: string; size?: number; is_dir?: boolean }>>([]);
+  const [installedProjectIds, setInstalledProjectIds] = useState<string[]>([]);
+  const [deletingName, setDeletingName] = useState<string | null>(null);
 
   const activeProjectType: "plugin" | "mod" | "datapack" = tab === "primary" ? primaryType : "datapack";
   const loader = modrinthLoaderForServer(server, activeProjectType);
@@ -1167,6 +1177,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     setQuery("");
     setSelectedCategory("all");
     setSelectedItem(null);
+    setMode("discover");
   }, [tab, server.server_id]);
 
   const categoryOptions = useMemo(() => {
@@ -1185,6 +1196,19 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     return out;
   }, [items, selectedCategory]);
 
+  async function refreshInstalled() {
+    if (!server.folder) return;
+    try {
+      const res = await cli<any>("modrinth_list_installed", server.folder, `--project_type=${activeProjectType}`);
+      const entries = Array.isArray(res?.data?.entries) ? res.data.entries : [];
+      const ids = Array.isArray(res?.data?.installed_project_ids) ? res.data.installed_project_ids : [];
+      setInstalledEntries(entries);
+      setInstalledProjectIds(ids.map((x: any) => String(x)));
+    } catch (e: any) {
+      addLog("err", `Failed to load installed content: ${String(e)}`);
+    }
+  }
+
   async function runSearch(searchText: string) {
     const trimmed = searchText.trim();
     const effectiveQuery = trimmed;
@@ -1195,7 +1219,6 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
       const args = ["modrinth_search", effectiveQuery, `--project_type=${activeProjectType}`];
       if (loader) args.push(`--loader=${loader}`);
-      // Auto-filter by server MC version so only compatible content is shown.
       if (gameVersion) args.push(`--game_version=${gameVersion}`);
       if (selectedCategory !== "all") args.push(`--category=${selectedCategory}`);
 
@@ -1215,6 +1238,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
   useEffect(() => {
     void runSearch("");
+    void refreshInstalled();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, server.server_id, activeProjectType]);
 
@@ -1229,6 +1253,10 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       addLog("err", "Cannot install content: server folder is unavailable.");
       return;
     }
+    if (installedProjectIds.includes(projectId)) {
+      addLog("warn", "Already installed.");
+      return;
+    }
 
     try {
       setInstallingId(projectId);
@@ -1237,12 +1265,32 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       if (gameVersion) args.push(`--game_version=${gameVersion}`);
 
       const res = await cli<any>(...args);
-      const count = Number(res?.data?.count ?? 0);
-      addLog("ok", `Installed ${count > 0 ? count : "selected"} file(s) from ${projectId}.`);
+      const alreadyInstalled = Boolean(res?.data?.already_installed);
+      if (alreadyInstalled) {
+        addLog("warn", `"${projectId}" is already installed.`);
+      } else {
+        const count = Number(res?.data?.count ?? 0);
+        addLog("ok", `Installed ${count > 0 ? count : "selected"} file(s) from ${projectId}.`);
+      }
+      await refreshInstalled();
     } catch (e: any) {
       addLog("err", `Install failed for ${projectId}: ${String(e)}`);
     } finally {
       setInstallingId(null);
+    }
+  }
+
+  async function deleteInstalled(name: string) {
+    if (!server.folder) return;
+    try {
+      setDeletingName(name);
+      await cli("modrinth_remove_installed", server.folder, activeProjectType, name);
+      addLog("ok", `Deleted ${name}.`);
+      await refreshInstalled();
+    } catch (e: any) {
+      addLog("err", `Delete failed for ${name}: ${String(e)}`);
+    } finally {
+      setDeletingName(null);
     }
   }
 
@@ -1253,68 +1301,97 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "primary" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("primary")}>{primaryLabel}</button>
         <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "datapack" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("datapack")}>Datapacks</button>
       </div>
+      <div style={styles.contentTabRow}>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(mode === "discover" ? styles.contentTabBtnActive : {}) }} onClick={() => setMode("discover")}>Discover</button>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(mode === "installed" ? styles.contentTabBtnActive : {}) }} onClick={() => { setMode("installed"); void refreshInstalled(); }}>Installed</button>
+      </div>
 
       <div style={styles.contentMeta}>Showing {activeProjectType}s relevant to this server{loader ? ` • loader: ${loader}` : ""}{gameVersion ? ` • MC ${gameVersion}` : ""}</div>
 
-      <div style={styles.contentSearchRow}>
-        <input
-          style={styles.search}
-          placeholder={`Search ${activeProjectType}s on Modrinth…`}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              runSearch(query);
-            }
-          }}
-        />
-        <button type="button" style={btn("primary")} onClick={() => runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
-      </div>
+      {mode === "discover" && (
+        <>
+          <div style={styles.contentSearchRow}>
+            <input
+              style={styles.search}
+              placeholder={`Search ${activeProjectType}s on Modrinth…`}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  runSearch(query);
+                }
+              }}
+            />
+            <button type="button" style={btn("primary")} onClick={() => runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+          </div>
 
-      <div style={styles.contentSearchRow}>
-        <select
-          style={styles.contentSelect}
-          value={selectedCategory}
-          onChange={(e) => setSelectedCategory(e.target.value)}
-        >
-          {categoryOptions.map((cat) => (
-            <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>
-          ))}
-        </select>
-      </div>
+          <div style={styles.contentSearchRow}>
+            <select
+              style={styles.contentSelect}
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+            >
+              {categoryOptions.map((cat) => (
+                <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>
+              ))}
+            </select>
+          </div>
 
-      {err && <div style={styles.consoleError}>Search error: {err}</div>}
+          {err && <div style={styles.consoleError}>Search error: {err}</div>}
 
-      <div style={styles.contentResults}>
-        {shownItems.length === 0 ? (
-          <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div>
-        ) : (
-          shownItems.map((item) => {
-            const id = String(item.project_id ?? "");
-            const title = item.title || id;
-            const installing = installingId === id;
-            const icon = typeof item.icon_url === "string" ? item.icon_url : null;
-            return (
-              <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
-                <div style={styles.contentItem}>
-                  <div style={styles.contentThumbWrap}>
-                    {icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}
+          <div style={styles.contentResults}>
+            {shownItems.length === 0 ? (
+              <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div>
+            ) : (
+              shownItems.map((item) => {
+                const id = String(item.project_id ?? "");
+                const title = item.title || id;
+                const installing = installingId === id;
+                const isInstalled = installedProjectIds.includes(id);
+                const icon = typeof item.icon_url === "string" ? item.icon_url : null;
+                return (
+                  <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
+                    <div style={styles.contentItem}>
+                      <div style={styles.contentThumbWrap}>
+                        {icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}
+                      </div>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={styles.contentItemTitle}>{title}</div>
+                        <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
+                        <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
+                      </div>
+                      <button type="button" style={btn(isInstalled ? "ghost" : "primary")} onClick={(e) => { e.stopPropagation(); if (!isInstalled) void installProject(id); }} disabled={installing || !id || isInstalled}>
+                        {isInstalled ? "Installed" : installing ? "Installing…" : "Install"}
+                      </button>
+                    </div>
                   </div>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={styles.contentItemTitle}>{title}</div>
-                    <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
-                    <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
-                  </div>
-                  <button type="button" style={btn("primary")} onClick={(e) => { e.stopPropagation(); void installProject(id); }} disabled={installing || !id}>
-                    {installing ? "Installing…" : "Install"}
-                  </button>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
+
+      {mode === "installed" && (
+        <div style={styles.contentResults}>
+          {installedEntries.length === 0 ? (
+            <div style={styles.playersEmpty}>No installed {activeProjectType}s found.</div>
+          ) : (
+            installedEntries.map((entry) => (
+              <div key={entry.name} style={styles.contentItem}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={styles.contentItemTitle}>{entry.name}</div>
+                  <div style={styles.contentItemMeta}>{entry.is_dir ? "Folder" : "File"}{typeof entry.size === "number" ? ` • ${(entry.size / (1024 * 1024)).toFixed(2)} MB` : ""}</div>
                 </div>
+                <button type="button" style={btn("danger")} disabled={deletingName === entry.name} onClick={() => void deleteInstalled(entry.name)}>
+                  {deletingName === entry.name ? "Deleting…" : "Delete"}
+                </button>
               </div>
-            );
-          })
-        )}
-      </div>
+            ))
+          )}
+        </div>
+      )}
 
       {selectedItem && (
         <div style={styles.contentOverlay} onClick={() => setSelectedItem(null)}>
@@ -1334,11 +1411,14 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
             <div style={styles.contentModalActions}>
               <button
                 type="button"
-                style={btn("primary")}
-                onClick={() => void installProject(String(selectedItem.project_id ?? ""))}
-                disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id}
+                style={btn(installedProjectIds.includes(String(selectedItem.project_id ?? "")) ? "ghost" : "primary")}
+                onClick={() => {
+                  const pid = String(selectedItem.project_id ?? "");
+                  if (!installedProjectIds.includes(pid)) void installProject(pid);
+                }}
+                disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id || installedProjectIds.includes(String(selectedItem.project_id ?? ""))}
               >
-                {installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}
+                {installedProjectIds.includes(String(selectedItem.project_id ?? "")) ? "Installed" : installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}
               </button>
             </div>
           </div>

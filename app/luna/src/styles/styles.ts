@@ -440,6 +440,86 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
 
+
+  contentTabRow: {
+    marginTop: 10,
+    display: "flex",
+    gap: 8,
+  },
+
+  contentTabBtn: {
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.03)",
+    color: "rgba(255,255,255,.88)",
+    borderRadius: 10,
+    padding: "7px 10px",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+
+  contentTabBtnActive: {
+    border: "1px solid rgba(56,189,248,.55)",
+    background: "rgba(56,189,248,.18)",
+    color: "rgba(224,242,254,.95)",
+  },
+
+  contentMeta: {
+    marginTop: 10,
+    opacity: 0.72,
+    fontSize: 12,
+    fontWeight: 700,
+  },
+
+  contentSearchRow: {
+    marginTop: 10,
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+  },
+
+  contentResults: {
+    marginTop: 10,
+    display: "grid",
+    gap: 8,
+    maxHeight: "52vh",
+    overflowY: "auto",
+    paddingRight: 4,
+  },
+
+  contentItem: {
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "flex-start",
+  },
+
+  contentItemTitle: {
+    fontSize: 13,
+    fontWeight: 900,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+
+  contentItemMeta: {
+    marginTop: 4,
+    fontSize: 11,
+    opacity: 0.72,
+    fontWeight: 700,
+  },
+
+  contentItemDesc: {
+    marginTop: 6,
+    fontSize: 12,
+    opacity: 0.84,
+    lineHeight: 1.35,
+  },
+
   detailsMetricsGrid: {
     display: "grid",
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",

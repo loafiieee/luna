@@ -818,10 +818,9 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
 
   const perfSamples = buildPerfSamples(rt);
-  const graphMaxMb =
-    ramMaxMb != null && ramMaxMb > 0
-      ? ramMaxMb
-      : Math.max(512, ...perfSamples, ramUsedMb != null ? ramUsedMb : 0);
+  // Keep a stable Y-axis so historical bars don't all resize every update.
+  const configuredRamMb = typeof server.ram === "number" && Number.isFinite(server.ram) && server.ram > 0 ? server.ram : null;
+  const graphMaxMb = Math.max(512, ramMaxMb ?? configuredRamMb ?? 0);
 
   return (
     <div>

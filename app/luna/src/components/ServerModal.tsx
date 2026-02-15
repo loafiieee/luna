@@ -818,12 +818,10 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
 
   const perfSamples = buildPerfSamples(rt);
-  const perfLatest = perfSamples.length > 0 ? perfSamples[perfSamples.length - 1] : 0;
-  const perfMin = perfSamples.length > 0 ? Math.min(...perfSamples) : 0;
-  const perfMax = perfSamples.length > 0 ? Math.max(...perfSamples) : 0;
-  const perfAvg = perfSamples.length > 0 ? perfSamples.reduce((a, b) => a + b, 0) / perfSamples.length : 0;
-  const metricsAgeSec =
-    typeof rt?.metrics_updated_at === "number" ? Math.max(0, Math.floor(nowMs / 1000 - rt.metrics_updated_at)) : null;
+  const graphMaxMb =
+    ramMaxMb != null && ramMaxMb > 0
+      ? ramMaxMb
+      : Math.max(512, ...perfSamples, ramUsedMb != null ? ramUsedMb : 0);
 
   return (
     <div>
@@ -836,24 +834,14 @@ function DetailsPane({ server }: { server: ServerInfo }) {
       </div>
 
       <div style={{ marginTop: 14 }}>
-        <div style={styles.smallLabel}>Performance graph (process CPU %)</div>
-        <div style={styles.perfStatsRow}>
-          <div style={styles.perfStatPill}>Now: {perfLatest.toFixed(1)}%</div>
-          <div style={styles.perfStatPill}>Avg: {perfAvg.toFixed(1)}%</div>
-          <div style={styles.perfStatPill}>Min: {perfMin.toFixed(1)}%</div>
-          <div style={styles.perfStatPill}>Max: {perfMax.toFixed(1)}%</div>
-        </div>
-        <div style={styles.perfMeta}>
-          Last {perfSamples.length} samples (~{perfSamples.length * 2}s window)
-          {metricsAgeSec != null ? ` • updated ${metricsAgeSec}s ago` : ""}
-        </div>
+        <div style={styles.smallLabel}>RAM usage (MB)</div>
         <div style={styles.perfGraphWrap}>
           <div style={styles.perfYAxis}>
-            <div>100%</div>
-            <div>75%</div>
-            <div>50%</div>
-            <div>25%</div>
-            <div>0%</div>
+            <div>{Math.round(graphMaxMb)}</div>
+            <div>{Math.round(graphMaxMb * 0.75)}</div>
+            <div>{Math.round(graphMaxMb * 0.5)}</div>
+            <div>{Math.round(graphMaxMb * 0.25)}</div>
+            <div>0</div>
           </div>
           <div style={styles.perfGraph}>
             {[25, 50, 75].map((level) => (
@@ -861,7 +849,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
             ))}
             {perfSamples.map((sample, idx) => {
               const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-              const y = 100 - Math.max(0, Math.min(100, sample));
+              const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
               return (
                 <div
                   key={idx}
@@ -870,7 +858,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
                     left: `${x}%`,
                     top: `${y}%`,
                   }}
-                  title={`${sample.toFixed(1)}%`}
+                  title={`${sample.toFixed(0)} MB`}
                 />
               );
             })}
@@ -889,7 +877,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
               points={perfSamples
                 .map((sample, idx) => {
                   const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-                  const y = 100 - Math.max(0, Math.min(100, sample));
+                  const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
                   return `${x},${y}`;
                 })
                 .join(" ")}
@@ -903,7 +891,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
               points={`0,100 ${perfSamples
                 .map((sample, idx) => {
                   const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-                  const y = 100 - Math.max(0, Math.min(100, sample));
+                  const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
                   return `${x},${y}`;
                 })
                 .join(" ")} 100,100`}
@@ -1056,20 +1044,23 @@ function pickRamMaxMb(rt: any): number | null {
 
 
 function buildPerfSamples(rt: any): number[] {
-  const candidates = [rt?.cpu_history, rt?.metrics?.cpu, rt?.performance?.cpu, rt?.history?.cpu];
+  const candidates = [
+    rt?.ram_used_history,
+    rt?.memory_history,
+    rt?.metrics?.ram_used,
+    rt?.metrics?.memory_used,
+    rt?.history?.ram_used_mb,
+  ];
   for (const c of candidates) {
     if (!Array.isArray(c)) continue;
-    const nums = c.filter((n: any) => typeof n === "number" && Number.isFinite(n)).slice(-24);
-    if (nums.length > 0) {
-      const clipped = nums.map((n: number) => Math.max(0, Math.min(100, n)));
-      return clipped.map((n, i, arr) => {
-        const prev = arr[i - 1] ?? n;
-        const next = arr[i + 1] ?? n;
-        return (prev + n + next) / 3;
-      });
-    }
+    const nums = c
+      .map((n: any) => parseMemoryToMb(n))
+      .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0)
+      .slice(-24);
+    if (nums.length > 0) return nums;
   }
-  return new Array(24).fill(0);
+  const current = parseMemoryToMb(rt?.ram_used_mb) ?? parseMemoryToMb(rt?.memory_mb) ?? parseMemoryToMb(rt?.ram_process_mb) ?? 0;
+  return new Array(24).fill(Math.max(0, current));
 }
 
 function formatUptime(sec: number | null) {

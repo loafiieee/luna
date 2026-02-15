@@ -478,6 +478,18 @@ export const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
   },
 
+  contentSelect: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(13,18,31,.96)",
+    color: "rgba(255,255,255,.95)",
+    fontSize: 12,
+    fontWeight: 700,
+    colorScheme: "dark",
+  },
+
   contentResults: {
     marginTop: 10,
     display: "grid",

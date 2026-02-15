@@ -474,24 +474,31 @@ export const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,.08)",
     background: "linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02))",
     padding: 8,
+    display: "flex",
+    alignItems: "stretch",
   },
 
-  perfLineSvg: {
-    position: "absolute",
-    inset: 8,
-    width: "calc(100% - 16px)",
-    height: "calc(100% - 16px)",
+  perfBars: {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: "repeat(30, minmax(0, 1fr))",
+    alignItems: "end",
+    gap: 2,
+    width: "100%",
+    height: "100%",
   },
 
-  perfDot: {
-    position: "absolute",
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-    background: "rgba(125,211,252,.95)",
-    boxShadow: "0 0 0 2px rgba(2,6,23,.8)",
-    transform: "translate(-50%, -50%)",
-    zIndex: 2,
+  perfBar: {
+    borderRadius: "4px 4px 0 0",
+    background: "linear-gradient(180deg, rgba(56,189,248,.92), rgba(56,189,248,.28))",
+    minHeight: 2,
+    boxShadow: "inset 0 0 0 1px rgba(186,230,253,.16)",
+  },
+
+  perfBarLatest: {
+    background: "linear-gradient(180deg, rgba(192,132,252,.98), rgba(168,85,247,.42))",
+    boxShadow: "inset 0 0 0 1px rgba(233,213,255,.3)",
   },
 
   perfGuide: {
@@ -524,6 +531,8 @@ export const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     opacity: 0.62,
     fontWeight: 700,
+    display: "flex",
+    justifyContent: "space-between",
   },
 
   banManagerToggle: {

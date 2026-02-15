@@ -632,7 +632,7 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
-        print(results)
+        result("modrinth_search", results)
         return 0
 
     if cmd == "modrinth_project":
@@ -648,7 +648,7 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
-        print(project)
+        result("modrinth_project", project)
         return 0
 
     if cmd == "modrinth_download":
@@ -720,8 +720,20 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
+        downloaded_paths: List[str] = []
         for out_file in downloaded:
             info(f"Downloaded {out_file} successfully.")
+            downloaded_paths.append(str(out_file))
+
+        result(
+            "modrinth_download",
+            {
+                "project_id": project_id,
+                "project_type": project_type,
+                "downloaded_files": downloaded_paths,
+                "count": len(downloaded_paths),
+            },
+        )
         return 0
     
     if cmd == "rename_server":

@@ -440,6 +440,86 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
 
+
+  contentTabRow: {
+    marginTop: 10,
+    display: "flex",
+    gap: 8,
+  },
+
+  contentTabBtn: {
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.03)",
+    color: "rgba(255,255,255,.88)",
+    borderRadius: 10,
+    padding: "7px 10px",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+
+  contentTabBtnActive: {
+    border: "1px solid rgba(56,189,248,.55)",
+    background: "rgba(56,189,248,.18)",
+    color: "rgba(224,242,254,.95)",
+  },
+
+  contentMeta: {
+    marginTop: 10,
+    opacity: 0.72,
+    fontSize: 12,
+    fontWeight: 700,
+  },
+
+  contentSearchRow: {
+    marginTop: 10,
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+  },
+
+  contentResults: {
+    marginTop: 10,
+    display: "grid",
+    gap: 8,
+    maxHeight: "52vh",
+    overflowY: "auto",
+    paddingRight: 4,
+  },
+
+  contentItem: {
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "flex-start",
+  },
+
+  contentItemTitle: {
+    fontSize: 13,
+    fontWeight: 900,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+
+  contentItemMeta: {
+    marginTop: 4,
+    fontSize: 11,
+    opacity: 0.72,
+    fontWeight: 700,
+  },
+
+  contentItemDesc: {
+    marginTop: 6,
+    fontSize: 12,
+    opacity: 0.84,
+    lineHeight: 1.35,
+  },
+
   detailsMetricsGrid: {
     display: "grid",
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
@@ -474,24 +554,31 @@ export const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,.08)",
     background: "linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02))",
     padding: 8,
+    display: "flex",
+    alignItems: "stretch",
   },
 
-  perfLineSvg: {
-    position: "absolute",
-    inset: 8,
-    width: "calc(100% - 16px)",
-    height: "calc(100% - 16px)",
+  perfBars: {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: "repeat(30, minmax(0, 1fr))",
+    alignItems: "end",
+    gap: 2,
+    width: "100%",
+    height: "100%",
   },
 
-  perfDot: {
-    position: "absolute",
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-    background: "rgba(125,211,252,.95)",
-    boxShadow: "0 0 0 2px rgba(2,6,23,.8)",
-    transform: "translate(-50%, -50%)",
-    zIndex: 2,
+  perfBar: {
+    borderRadius: "4px 4px 0 0",
+    background: "linear-gradient(180deg, rgba(56,189,248,.92), rgba(56,189,248,.28))",
+    minHeight: 2,
+    boxShadow: "inset 0 0 0 1px rgba(186,230,253,.16)",
+  },
+
+  perfBarLatest: {
+    background: "linear-gradient(180deg, rgba(192,132,252,.98), rgba(168,85,247,.42))",
+    boxShadow: "inset 0 0 0 1px rgba(233,213,255,.3)",
   },
 
   perfGuide: {
@@ -524,6 +611,8 @@ export const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     opacity: 0.62,
     fontWeight: 700,
+    display: "flex",
+    justifyContent: "space-between",
   },
 
   banManagerToggle: {

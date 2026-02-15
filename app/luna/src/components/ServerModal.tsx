@@ -8,6 +8,7 @@ import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
 import { isServerOnline, playersList } from "../lib/serverRuntime";
+import { cli } from "../lib/cli";
 
 export type ServerModalProps = {
   server: ServerInfo;
@@ -313,9 +314,7 @@ async function copyAddress() {
         <div style={styles.centerPane}>
           {tab === "details" && <DetailsPane server={server} />}
           {tab === "console" && <ConsolePane server={server} addLog={addLog} isOnline={isOnline} actionBusy={actionBusy} />}
-          {tab === "content" && (
-            <PlaceholderPane title="Content" desc="Plugins / Mods / Datapacks UI scaffold (Modrinth later)." />
-          )}
+          {tab === "content" && <ContentPane server={server} addLog={addLog} />}
           {tab === "backups" && <PlaceholderPane title="Backups" desc="Hook to backup commands later." />}
           {tab === "tunnels" && <TunnelsPane server={server} />}
           {tab === "settings" && <PlaceholderPane title="Settings" desc="server.properties editor + RAM/port, etc." />}
@@ -818,10 +817,9 @@ function DetailsPane({ server }: { server: ServerInfo }) {
   const uptimeSeconds = isOnline && startedAtSec ? Math.max(0, Math.floor(nowMs / 1000 - startedAtSec)) : null;
 
   const perfSamples = buildPerfSamples(rt);
-  const graphMaxMb =
-    ramMaxMb != null && ramMaxMb > 0
-      ? ramMaxMb
-      : Math.max(512, ...perfSamples, ramUsedMb != null ? ramUsedMb : 0);
+  // Keep a stable Y-axis so historical bars don't all resize every update.
+  const configuredRamMb = typeof server.ram === "number" && Number.isFinite(server.ram) && server.ram > 0 ? server.ram : null;
+  const graphMaxMb = Math.max(512, ramMaxMb ?? configuredRamMb ?? 0);
 
   return (
     <div>
@@ -834,7 +832,7 @@ function DetailsPane({ server }: { server: ServerInfo }) {
       </div>
 
       <div style={{ marginTop: 14 }}>
-        <div style={styles.smallLabel}>RAM usage (MB)</div>
+        <div style={styles.smallLabel}>RAM usage over past minute (MB)</div>
         <div style={styles.perfGraphWrap}>
           <div style={styles.perfYAxis}>
             <div>{Math.round(graphMaxMb)}</div>
@@ -847,58 +845,28 @@ function DetailsPane({ server }: { server: ServerInfo }) {
             {[25, 50, 75].map((level) => (
               <div key={level} style={{ ...styles.perfGuide, top: `${100 - level}%` }} />
             ))}
-            {perfSamples.map((sample, idx) => {
-              const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-              const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
-              return (
-                <div
-                  key={idx}
-                  style={{
-                    ...styles.perfDot,
-                    left: `${x}%`,
-                    top: `${y}%`,
-                  }}
-                  title={`${sample.toFixed(0)} MB`}
-                />
-              );
-            })}
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={styles.perfLineSvg}>
-            <defs>
-              <linearGradient id="perf-line" x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%" stopColor="rgba(56,189,248,0.95)" />
-                <stop offset="100%" stopColor="rgba(192,132,252,0.95)" />
-              </linearGradient>
-              <linearGradient id="perf-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgba(56,189,248,0.25)" />
-                <stop offset="100%" stopColor="rgba(56,189,248,0.02)" />
-              </linearGradient>
-            </defs>
-            <polyline
-              points={perfSamples
-                .map((sample, idx) => {
-                  const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-                  const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
-                  return `${x},${y}`;
-                })
-                .join(" ")}
-              fill="none"
-              stroke="url(#perf-line)"
-              strokeWidth="1.8"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-            <polygon
-              points={`0,100 ${perfSamples
-                .map((sample, idx) => {
-                  const x = (idx / Math.max(1, perfSamples.length - 1)) * 100;
-                  const y = 100 - Math.max(0, Math.min(100, (sample / graphMaxMb) * 100));
-                  return `${x},${y}`;
-                })
-                .join(" ")} 100,100`}
-              fill="url(#perf-fill)"
-            />
-            </svg>
+            <div style={styles.perfBars}>
+              {perfSamples.map((sample, idx) => {
+                const h = Math.max(2, Math.min(100, (sample / graphMaxMb) * 100));
+                const isLatest = idx === perfSamples.length - 1;
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      ...styles.perfBar,
+                      height: `${h}%`,
+                      ...(isLatest ? styles.perfBarLatest : {}),
+                    }}
+                    title={`${sample.toFixed(0)} MB`}
+                  />
+                );
+              })}
+            </div>
           </div>
+        </div>
+        <div style={styles.perfMeta}>
+          <span>60s ago</span>
+          <span>Now</span>
         </div>
       </div>
 
@@ -1056,11 +1024,11 @@ function buildPerfSamples(rt: any): number[] {
     const nums = c
       .map((n: any) => parseMemoryToMb(n))
       .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0)
-      .slice(-24);
+      .slice(-30);
     if (nums.length > 0) return nums;
   }
   const current = parseMemoryToMb(rt?.ram_used_mb) ?? parseMemoryToMb(rt?.memory_mb) ?? parseMemoryToMb(rt?.ram_process_mb) ?? 0;
-  return new Array(24).fill(Math.max(0, current));
+  return new Array(30).fill(Math.max(0, current));
 }
 
 function formatUptime(sec: number | null) {
@@ -1102,6 +1070,187 @@ function TunnelsPane({ server }: { server: ServerInfo }) {
         <KV k="Public TCP (Java)" v={tcp ?? "—"} mono />
         <KV k="Public UDP (Bedrock)" v={udp ?? "—"} mono />
         <KV k="Public Voice" v={voice ?? "—"} mono />
+      </div>
+    </div>
+  );
+}
+
+type ContentTabKey = "primary" | "datapack";
+
+type ModrinthHit = {
+  project_id: string;
+  title?: string;
+  description?: string;
+  author?: string;
+  versions?: string[];
+  categories?: string[];
+  downloads?: number;
+};
+
+function primaryContentTypeForServer(server: ServerInfo): "plugin" | "mod" {
+  const platform = String(server.platform ?? "").toLowerCase();
+  const modLoaders = ["fabric", "forge", "neoforge", "quilt"];
+  if (modLoaders.some((loader) => platform.includes(loader))) return "mod";
+  return "plugin";
+}
+
+function modrinthLoaderForServer(server: ServerInfo, projectType: "plugin" | "mod" | "datapack"): string | null {
+  if (projectType === "datapack") return null;
+  const platform = String(server.platform ?? "").toLowerCase();
+
+  if (projectType === "mod") {
+    if (platform.includes("neoforge")) return "neoforge";
+    if (platform.includes("forge")) return "forge";
+    if (platform.includes("quilt")) return "quilt";
+    if (platform.includes("fabric")) return "fabric";
+    return null;
+  }
+
+  if (platform.includes("paper") || platform.includes("purpur") || platform.includes("pufferfish")) return "paper";
+  if (platform.includes("spigot")) return "spigot";
+  if (platform.includes("bukkit")) return "bukkit";
+  return null;
+}
+
+function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const primaryType = primaryContentTypeForServer(server);
+  const primaryLabel = primaryType === "mod" ? "Mods" : "Plugins";
+  const [tab, setTab] = useState<ContentTabKey>("primary");
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("");
+  const [items, setItems] = useState<ModrinthHit[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [installingId, setInstallingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setItems([]);
+    setErr(null);
+    setQuery("");
+    setFilter("");
+  }, [tab, server.server_id]);
+
+  const activeProjectType: "plugin" | "mod" | "datapack" = tab === "primary" ? primaryType : "datapack";
+  const loader = modrinthLoaderForServer(server, activeProjectType);
+  const gameVersion = typeof server.version === "string" && server.version.trim() ? server.version.trim() : null;
+
+  const shownItems = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((item) => {
+      const title = String(item.title ?? "").toLowerCase();
+      const desc = String(item.description ?? "").toLowerCase();
+      const author = String(item.author ?? "").toLowerCase();
+      return title.includes(q) || desc.includes(q) || author.includes(q);
+    });
+  }, [filter, items]);
+
+  async function runSearch() {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setErr("Enter a search term.");
+      setItems([]);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setErr(null);
+
+      const args = ["modrinth_search", trimmed, `--project_type=${activeProjectType}`];
+      if (loader) args.push(`--loader=${loader}`);
+      if (gameVersion) args.push(`--game_version=${gameVersion}`);
+
+      const res = await cli<any>(...args);
+      const hits = Array.isArray(res?.data?.hits) ? res.data.hits : [];
+      setItems(hits);
+      addLog("ok", `Found ${hits.length} ${activeProjectType} result(s) on Modrinth.`);
+    } catch (e: any) {
+      const msg = String(e);
+      setErr(msg);
+      setItems([]);
+      addLog("err", `Modrinth search failed: ${msg}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function installProject(projectId: string) {
+    if (!server.folder) {
+      addLog("err", "Cannot install content: server folder is unavailable.");
+      return;
+    }
+
+    try {
+      setInstallingId(projectId);
+      const args = ["modrinth_download", server.folder, projectId, `--project_type=${activeProjectType}`];
+      if (loader) args.push(`--loader=${loader}`);
+      if (gameVersion) args.push(`--game_version=${gameVersion}`);
+
+      const res = await cli<any>(...args);
+      const count = Number(res?.data?.count ?? 0);
+      addLog("ok", `Installed ${count > 0 ? count : "selected"} file(s) from ${projectId}.`);
+    } catch (e: any) {
+      addLog("err", `Install failed for ${projectId}: ${String(e)}`);
+    } finally {
+      setInstallingId(null);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Content</div>
+      <div style={styles.contentTabRow}>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "primary" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("primary")}>{primaryLabel}</button>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "datapack" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("datapack")}>Datapacks</button>
+      </div>
+
+      <div style={styles.contentMeta}>Searching Modrinth for {activeProjectType}s{loader ? ` • loader: ${loader}` : ""}{gameVersion ? ` • MC ${gameVersion}` : ""}</div>
+
+      <div style={styles.contentSearchRow}>
+        <input
+          style={styles.search}
+          placeholder={`Search ${activeProjectType}s on Modrinth…`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              runSearch();
+            }
+          }}
+        />
+        <button type="button" style={btn("primary")} onClick={runSearch} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+      </div>
+
+      <div style={styles.contentSearchRow}>
+        <input style={styles.search} placeholder="Filter current results…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+      </div>
+
+      {err && <div style={styles.consoleError}>Search error: {err}</div>}
+
+      <div style={styles.contentResults}>
+        {shownItems.length === 0 ? (
+          <div style={styles.playersEmpty}>{query.trim() ? "No results found." : `Search for ${activeProjectType}s to get started.`}</div>
+        ) : (
+          shownItems.map((item) => {
+            const id = String(item.project_id ?? "");
+            const title = item.title || id;
+            const installing = installingId === id;
+            return (
+              <div key={id} style={styles.contentItem}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={styles.contentItemTitle}>{title}</div>
+                  <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
+                  <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
+                </div>
+                <button type="button" style={btn("primary")} onClick={() => installProject(id)} disabled={installing || !id}>
+                  {installing ? "Installing…" : "Install"}
+                </button>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );

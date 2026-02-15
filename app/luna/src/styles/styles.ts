@@ -450,27 +450,81 @@ export const styles: Record<string, React.CSSProperties> = {
   perfGraph: {
     marginTop: 8,
     height: 110,
+    position: "relative",
+    overflow: "hidden",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.08)",
-    background: "rgba(255,255,255,.03)",
-    display: "grid",
-    gridTemplateColumns: "repeat(24, 1fr)",
-    alignItems: "end",
-    gap: 4,
+    background: "linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02))",
     padding: 8,
   },
 
-  perfBarWrap: {
-    height: "100%",
-    display: "flex",
-    alignItems: "end",
+  perfLineSvg: {
+    position: "absolute",
+    inset: 8,
+    width: "calc(100% - 16px)",
+    height: "calc(100% - 16px)",
   },
 
-  perfBar: {
+  perfDot: {
+    position: "absolute",
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+    background: "rgba(125,211,252,.95)",
+    boxShadow: "0 0 0 2px rgba(2,6,23,.8)",
+    transform: "translate(-50%, -50%)",
+    zIndex: 2,
+  },
+
+  banManagerToggle: {
     width: "100%",
-    borderRadius: 4,
-    background: "linear-gradient(180deg, rgba(59,130,246,.95), rgba(168,85,247,.9))",
-    minHeight: 4,
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(125,211,252,.35)",
+    background: "rgba(56,189,248,.14)",
+    color: "rgba(224,242,254,.95)",
+    fontWeight: 900,
+    cursor: "pointer",
+    marginTop: 8,
+  },
+
+  banManagerWrap: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+
+  banManagerHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+
+  banSection: {
+    border: "1px solid rgba(255,255,255,.08)",
+    borderRadius: 12,
+    padding: 8,
+    background: "rgba(255,255,255,.04)",
+  },
+
+  banSectionTitle: {
+    fontWeight: 900,
+    opacity: 0.8,
+    fontSize: 12,
+    marginBottom: 8,
+  },
+
+  banRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "6px 8px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,.08)",
+    background: "rgba(255,255,255,.03)",
+    marginBottom: 6,
   },
 
   kvGrid: {

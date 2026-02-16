@@ -1151,7 +1151,27 @@ function normalizeCategories(hit: ModrinthHit): string[] {
     .filter((c) => !/^\d+(?:\.\d+){1,3}$/.test(c));
 }
 
+
+function utf8ToBase64(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return btoa(binary);
+}
+
 function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  type InstalledProject = {
+    project_id: string;
+    title: string;
+    author?: string | null;
+    icon_url?: string | null;
+    description?: string | null;
+    files: string[];
+    installed_at?: number | null;
+  };
+
   const primaryType = primaryContentTypeForServer(server);
   const primaryLabel = primaryType === "mod" ? "Mods" : "Plugins";
   const [tab, setTab] = useState<ContentTabKey>("primary");
@@ -1163,10 +1183,9 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<ModrinthHit | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [installedByType, setInstalledByType] = useState<{
-    primary: Array<{ project_id: string; files: string[]; installed_at?: number | null }>;
-    datapack: Array<{ project_id: string; files: string[]; installed_at?: number | null }>;
-  }>({ primary: [], datapack: [] });
+  const [installedByType, setInstalledByType] = useState<{ primary: InstalledProject[]; datapack: InstalledProject[] }>({ primary: [], datapack: [] });
+  const [configPicker, setConfigPicker] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; candidates: Array<{ relative_path: string; reason?: string; score?: number }> } | null>(null);
+  const [editorState, setEditorState] = useState<{ projectTitle: string; relativePath: string; content: string; dirty: boolean; saving: boolean } | null>(null);
 
   const activeProjectType: "plugin" | "mod" | "datapack" = tab === "datapack" ? "datapack" : primaryType;
   const loader = modrinthLoaderForServer(server, activeProjectType);
@@ -1193,6 +1212,10 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
           .filter((r) => r && typeof r.project_id === "string")
           .map((r) => ({
             project_id: String(r.project_id),
+            title: String(r.title ?? r.project_id),
+            author: typeof r.author === "string" ? r.author : null,
+            icon_url: typeof r.icon_url === "string" ? r.icon_url : null,
+            description: typeof r.description === "string" ? r.description : null,
             files: Array.isArray(r.files) ? r.files.map((f: any) => String(f)) : [],
             installed_at: typeof r.installed_at === "number" ? r.installed_at : null,
           }));
@@ -1221,24 +1244,19 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
   const shownItems = useMemo(() => {
     let out = items;
-    if (selectedCategory !== "all") {
-      out = out.filter((item) => normalizeCategories(item).includes(selectedCategory));
-    }
+    if (selectedCategory !== "all") out = out.filter((item) => normalizeCategories(item).includes(selectedCategory));
     return out;
   }, [items, selectedCategory]);
 
   async function runSearch(searchText: string) {
     const trimmed = searchText.trim();
-
     try {
       setLoading(true);
       setErr(null);
-
       const args = ["modrinth_search", trimmed, `--project_type=${activeProjectType}`];
       if (loader) args.push(`--loader=${loader}`);
       if (gameVersion) args.push(`--game_version=${gameVersion}`);
       if (selectedCategory !== "all") args.push(`--category=${selectedCategory}`);
-
       const res = await cli<any>(...args);
       const hits = Array.isArray(res?.data?.hits) ? res.data.hits : [];
       setItems(hits);
@@ -1255,42 +1273,28 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
   useEffect(() => {
     void refreshInstalled();
-    if (tab !== "installed") {
-      void runSearch("");
-    }
+    if (tab !== "installed") void runSearch("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, server.server_id, primaryType]);
 
   useEffect(() => {
-    if (tab === "installed") return;
-    if (selectedCategory === "all") return;
+    if (tab === "installed" || selectedCategory === "all") return;
     void runSearch(query);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCategory]);
 
   async function installProject(projectId: string) {
-    if (!server.folder) {
-      addLog("err", "Cannot install content: server folder is unavailable.");
-      return;
-    }
-    if (installedIds.has(projectId)) {
-      addLog("warn", "Already installed.");
-      return;
-    }
+    if (!server.folder) return addLog("err", "Cannot install content: server folder is unavailable.");
+    if (installedIds.has(projectId)) return addLog("warn", "Already installed.");
 
     try {
       setInstallingId(projectId);
       const args = ["modrinth_download", server.folder, projectId, `--project_type=${activeProjectType}`];
       if (loader) args.push(`--loader=${loader}`);
       if (gameVersion) args.push(`--game_version=${gameVersion}`);
-
       const res = await cli<any>(...args);
-      if (Boolean(res?.data?.already_installed)) {
-        addLog("warn", `"${projectId}" is already installed.`);
-      } else {
-        const count = Number(res?.data?.count ?? 0);
-        addLog("ok", `Installed ${count > 0 ? count : "selected"} file(s) from ${projectId}.`);
-      }
+      if (Boolean(res?.data?.already_installed)) addLog("warn", `"${projectId}" is already installed.`);
+      else addLog("ok", `Installed ${Number(res?.data?.count ?? 0)} file(s) from ${projectId}.`);
       await refreshInstalled();
     } catch (e: any) {
       addLog("err", `Install failed for ${projectId}: ${String(e)}`);
@@ -1302,7 +1306,8 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   async function uninstallProject(projectType: "plugin" | "mod" | "datapack", projectId: string) {
     if (!server.folder) return;
     try {
-      setDeletingId(`${projectType}:${projectId}`);
+      const key = `${projectType}:${projectId}`;
+      setDeletingId(key);
       await cli("modrinth_uninstall_project", server.folder, projectType, projectId);
       addLog("ok", `Uninstalled ${projectId}.`);
       await refreshInstalled();
@@ -1311,6 +1316,80 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     } finally {
       setDeletingId(null);
     }
+  }
+
+  async function openConfigFile(projectTitle: string, relPath: string) {
+    if (!server.folder) return;
+    try {
+      const res = await cli<any>("read_server_text_file", server.folder, relPath);
+      setEditorState({ projectTitle, relativePath: relPath, content: String(res?.data?.content ?? ""), dirty: false, saving: false });
+      setConfigPicker(null);
+    } catch (e: any) {
+      addLog("err", `Could not open config file: ${String(e)}`);
+    }
+  }
+
+  async function openConfigPicker(projectType: "plugin" | "mod" | "datapack", projectId: string, projectTitle: string) {
+    if (!server.folder) return;
+    try {
+      const res = await cli<any>("modrinth_config_candidates", server.folder, projectType, projectId);
+      const cands = Array.isArray(res?.data?.candidates) ? res.data.candidates : [];
+      if (cands.length === 0) {
+        addLog("warn", `No config files detected for ${projectTitle}.`);
+        return;
+      }
+      if (cands.length === 1) {
+        await openConfigFile(projectTitle, String(cands[0].relative_path));
+        return;
+      }
+      setConfigPicker({ projectType, projectId, projectTitle, candidates: cands.map((c: any) => ({ relative_path: String(c.relative_path), reason: c.reason, score: c.score })) });
+    } catch (e: any) {
+      addLog("err", `Failed to find config files: ${String(e)}`);
+    }
+  }
+
+  async function saveEditor() {
+    if (!editorState || !server.folder) return;
+    try {
+      setEditorState((prev) => (prev ? { ...prev, saving: true } : prev));
+      const encoded = utf8ToBase64(editorState.content);
+      await cli("write_server_text_file", server.folder, editorState.relativePath, encoded);
+      setEditorState((prev) => (prev ? { ...prev, saving: false, dirty: false } : prev));
+      addLog("ok", `Saved ${editorState.relativePath}.`);
+    } catch (e: any) {
+      setEditorState((prev) => (prev ? { ...prev, saving: false } : prev));
+      addLog("err", `Failed saving file: ${String(e)}`);
+    }
+  }
+
+  function renderInstalledSection(label: string, projectType: "plugin" | "mod" | "datapack", rows: InstalledProject[]) {
+    return (
+      <>
+        <div style={styles.contentSectionTitle}>{label}</div>
+        {rows.length === 0 ? (
+          <div style={styles.playersEmpty}>No installed {label.toLowerCase()}.</div>
+        ) : (
+          rows.map((row) => {
+            const key = `${projectType}:${row.project_id}`;
+            const icon = row.icon_url || null;
+            return (
+              <div key={key} style={styles.contentItem}>
+                <div style={styles.contentThumbWrap}>{icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}</div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={styles.contentItemTitle}>{row.title || row.project_id}</div>
+                  <div style={styles.contentItemMeta}>{row.author ? `by ${row.author} • ` : ""}{row.files.length} file(s)</div>
+                  <div style={styles.contentItemDesc}>{row.description || row.project_id}</div>
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>Config</button>
+                  <button type="button" style={btn("danger")} disabled={deletingId === key} onClick={() => void uninstallProject(projectType, row.project_id)}>{deletingId === key ? "Deleting…" : "Delete"}</button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </>
+    );
   }
 
   return (
@@ -1322,114 +1401,49 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "installed" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("installed")}>Installed</button>
       </div>
 
-      <div style={styles.contentMeta}>Showing {tab === "installed" ? "installed content" : `${activeProjectType}s relevant to this server${loader ? ` • loader: ${loader}` : ""}${gameVersion ? ` • MC ${gameVersion}` : ""}`}</div>
+      <div style={styles.contentMeta}>{tab === "installed" ? "Manage installed content and configs." : `Showing ${activeProjectType}s relevant to this server${loader ? ` • loader: ${loader}` : ""}${gameVersion ? ` • MC ${gameVersion}` : ""}`}</div>
 
       {tab !== "installed" && (
         <>
           <div style={styles.contentSearchRow}>
-            <input
-              style={styles.search}
-              placeholder={`Search ${activeProjectType}s on Modrinth…`}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  runSearch(query);
-                }
-              }}
-            />
-            <button type="button" style={btn("primary")} onClick={() => runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+            <input style={styles.search} placeholder={`Search ${activeProjectType}s on Modrinth…`} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void runSearch(query); } }} />
+            <button type="button" style={btn("primary")} onClick={() => void runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
           </div>
-
           <div style={styles.contentSearchRow}>
-            <select
-              style={styles.contentSelect}
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-            >
-              {categoryOptions.map((cat) => (
-                <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>
-              ))}
+            <select style={styles.contentSelect} value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
+              {categoryOptions.map((cat) => <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>)}
             </select>
           </div>
-
           {err && <div style={styles.consoleError}>Search error: {err}</div>}
-
           <div style={styles.contentResults}>
-            {shownItems.length === 0 ? (
-              <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div>
-            ) : (
-              shownItems.map((item) => {
-                const id = String(item.project_id ?? "");
-                const title = item.title || id;
-                const installing = installingId === id;
-                const isInstalled = installedIds.has(id);
-                const icon = typeof item.icon_url === "string" ? item.icon_url : null;
-                return (
-                  <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
-                    <div style={styles.contentItem}>
-                      <div style={styles.contentThumbWrap}>
-                        {icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}
-                      </div>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={styles.contentItemTitle}>{title}</div>
-                        <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
-                        <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
-                      </div>
-                      <button type="button" style={btn(isInstalled ? "ghost" : "primary")} onClick={(e) => { e.stopPropagation(); if (!isInstalled) void installProject(id); }} disabled={installing || !id || isInstalled}>
-                        {isInstalled ? "Installed" : installing ? "Installing…" : "Install"}
-                      </button>
+            {shownItems.length === 0 ? <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div> : shownItems.map((item) => {
+              const id = String(item.project_id ?? "");
+              const title = item.title || id;
+              const installing = installingId === id;
+              const isInstalled = installedIds.has(id);
+              const icon = typeof item.icon_url === "string" ? item.icon_url : null;
+              return (
+                <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
+                  <div style={styles.contentItem}>
+                    <div style={styles.contentThumbWrap}>{icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}</div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={styles.contentItemTitle}>{title}</div>
+                      <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
+                      <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
                     </div>
+                    <button type="button" style={btn(isInstalled ? "ghost" : "primary")} onClick={(e) => { e.stopPropagation(); if (!isInstalled) void installProject(id); }} disabled={installing || !id || isInstalled}>{isInstalled ? "Installed" : installing ? "Installing…" : "Install"}</button>
                   </div>
-                );
-              })
-            )}
+                </div>
+              );
+            })}
           </div>
         </>
       )}
 
       {tab === "installed" && (
         <div style={styles.contentResults}>
-          <div style={styles.contentSectionTitle}>{primaryLabel}</div>
-          {installedByType.primary.length === 0 ? (
-            <div style={styles.playersEmpty}>No installed {primaryLabel.toLowerCase()}.</div>
-          ) : (
-            installedByType.primary.map((row) => {
-              const key = `${primaryType}:${row.project_id}`;
-              return (
-                <div key={key} style={styles.contentItem}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={styles.contentItemTitle}>{row.project_id}</div>
-                    <div style={styles.contentItemMeta}>{row.files.length} file(s)</div>
-                  </div>
-                  <button type="button" style={btn("danger")} disabled={deletingId === key} onClick={() => void uninstallProject(primaryType, row.project_id)}>
-                    {deletingId === key ? "Deleting…" : "Delete"}
-                  </button>
-                </div>
-              );
-            })
-          )}
-
-          <div style={styles.contentSectionTitle}>Datapacks</div>
-          {installedByType.datapack.length === 0 ? (
-            <div style={styles.playersEmpty}>No installed datapacks.</div>
-          ) : (
-            installedByType.datapack.map((row) => {
-              const key = `datapack:${row.project_id}`;
-              return (
-                <div key={key} style={styles.contentItem}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={styles.contentItemTitle}>{row.project_id}</div>
-                    <div style={styles.contentItemMeta}>{row.files.length} file(s)</div>
-                  </div>
-                  <button type="button" style={btn("danger")} disabled={deletingId === key} onClick={() => void uninstallProject("datapack", row.project_id)}>
-                    {deletingId === key ? "Deleting…" : "Delete"}
-                  </button>
-                </div>
-              );
-            })
-          )}
+          {renderInstalledSection(primaryLabel, primaryType, installedByType.primary)}
+          {renderInstalledSection("Datapacks", "datapack", installedByType.datapack)}
         </div>
       )}
 
@@ -1449,17 +1463,50 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
               <div style={styles.contentItemMeta}>Versions: {Array.isArray(selectedItem.versions) ? selectedItem.versions.join(", ") : "—"}</div>
             </div>
             <div style={styles.contentModalActions}>
-              <button
-                type="button"
-                style={btn(installedIds.has(String(selectedItem.project_id ?? "")) ? "ghost" : "primary")}
-                onClick={() => {
-                  const pid = String(selectedItem.project_id ?? "");
-                  if (!installedIds.has(pid)) void installProject(pid);
-                }}
-                disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id || installedIds.has(String(selectedItem.project_id ?? ""))}
-              >
-                {installedIds.has(String(selectedItem.project_id ?? "")) ? "Installed" : installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}
-              </button>
+              <button type="button" style={btn(installedIds.has(String(selectedItem.project_id ?? "")) ? "ghost" : "primary")} onClick={() => { const pid = String(selectedItem.project_id ?? ""); if (!installedIds.has(pid)) void installProject(pid); }} disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id || installedIds.has(String(selectedItem.project_id ?? ""))}>{installedIds.has(String(selectedItem.project_id ?? "")) ? "Installed" : installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {configPicker && (
+        <div style={styles.contentOverlay} onClick={() => setConfigPicker(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>Choose config file — {configPicker.projectTitle}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setConfigPicker(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              {configPicker.candidates.map((c) => (
+                <button key={c.relative_path} type="button" style={{ ...styles.contentItem, cursor: "pointer" }} onClick={() => void openConfigFile(configPicker.projectTitle, c.relative_path)}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={styles.contentItemTitle}>{c.relative_path}</div>
+                    <div style={styles.contentItemMeta}>{c.reason ?? "match"}{typeof c.score === "number" ? ` • score ${c.score}` : ""}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editorState && (
+        <div style={styles.contentOverlay} onClick={() => setEditorState((prev) => (prev?.dirty ? prev : null))}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>Edit config — {editorState.projectTitle}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setEditorState((prev) => (prev?.dirty ? prev : null))} disabled={editorState.dirty}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              <div style={styles.contentItemMeta}>{editorState.relativePath}</div>
+              <textarea
+                style={styles.configEditorArea}
+                value={editorState.content}
+                onChange={(e) => setEditorState((prev) => (prev ? { ...prev, content: e.target.value, dirty: true } : prev))}
+              />
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn("primary")} disabled={!editorState.dirty || editorState.saving} onClick={() => void saveEditor()}>{editorState.saving ? "Saving…" : "Save"}</button>
             </div>
           </div>
         </div>

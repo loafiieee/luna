@@ -490,6 +490,15 @@ export const styles: Record<string, React.CSSProperties> = {
     colorScheme: "dark",
   },
 
+  contentSectionTitle: {
+    marginTop: 8,
+    marginBottom: 4,
+    fontSize: 12,
+    fontWeight: 900,
+    opacity: 0.78,
+    letterSpacing: 0.2,
+  },
+
   contentResults: {
     marginTop: 10,
     display: "grid",

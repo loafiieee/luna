@@ -1428,7 +1428,7 @@ ${state.relativePath}`);
                   <div style={styles.contentItemDesc}>{row.description || row.project_id}</div>
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
-                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>{row.preferred_config_path ? "Config (preferred)" : "Config"}</button>
+                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>{row.preferred_config_path ? "Config" : "Config"}</button>
                   <button type="button" style={btn("danger")} disabled={deletingId === key} onClick={() => void uninstallProject(projectType, row.project_id)}>{deletingId === key ? "Deleting…" : "Delete"}</button>
                 </div>
               </div>

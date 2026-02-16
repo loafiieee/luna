@@ -91,8 +91,14 @@ def _ts() -> str:
 
 
 def _print_json(obj: Dict[str, Any]) -> None:
-    _RAW_STDOUT.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    _RAW_STDOUT.flush()
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    try:
+        # Write UTF-8 bytes directly so emojis/non-ASCII from APIs don't fail on cp1252/charmap consoles.
+        _RAW_STDOUT.buffer.write(line.encode("utf-8", errors="replace"))
+        _RAW_STDOUT.buffer.flush()
+    except Exception:
+        _RAW_STDOUT.write(json.dumps(obj, ensure_ascii=True) + "\n")
+        _RAW_STDOUT.flush()
 
 
 def info(message: str) -> None:

@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
+import base64
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -135,6 +137,106 @@ def _list_installed_entries(server_path: Path, project_type: str) -> List[Dict[s
         except Exception:
             continue
     return entries
+
+def _project_display_name(project: Dict[str, object], project_id: str) -> str:
+    title = project.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    slug = project.get("slug")
+    if isinstance(slug, str) and slug.strip():
+        return slug.strip()
+    return project_id
+
+
+def _safe_server_relative_path(server_path: Path, rel_path: str) -> Optional[Path]:
+    rel = Path(rel_path)
+    if rel.is_absolute():
+        return None
+    target = (server_path / rel).resolve()
+    base = server_path.resolve()
+    if base not in target.parents and target != base:
+        return None
+    return target
+
+
+def _config_candidates_for_project(server_path: Path, project_type: str, meta: Dict[str, object]) -> List[Dict[str, object]]:
+    project_id = str(meta.get("project_id") or "")
+    slug = str(meta.get("slug") or "")
+    title = str(meta.get("title") or "")
+    files = meta.get("files") if isinstance(meta.get("files"), list) else []
+
+    tokens = {t.lower() for t in [project_id, slug, title] if isinstance(t, str) and t.strip()}
+    expanded_tokens = set(tokens)
+    for t in list(tokens):
+        expanded_tokens.add(re.sub(r"[^a-z0-9]+", "", t))
+        expanded_tokens.add(t.replace("-", "").replace("_", ""))
+
+    exts = {".yml", ".yaml", ".json", ".toml", ".cfg", ".conf", ".properties", ".txt", ".ini"}
+    roots = [server_path / "config"]
+    if project_type == "plugin":
+        roots.append(server_path / "plugins")
+    if project_type == "mod":
+        roots.append(server_path / "mods")
+    if project_type == "datapack":
+        roots.append(server_path / "world" / "datapacks")
+
+    hits: Dict[str, Dict[str, object]] = {}
+
+    def add_hit(path: Path, reason: str, score: int) -> None:
+        try:
+            rel = path.resolve().relative_to(server_path.resolve())
+        except Exception:
+            return
+        key = str(rel)
+        cur = hits.get(key)
+        row = {
+            "relative_path": key,
+            "reason": reason,
+            "score": score,
+        }
+        if cur is None or int(cur.get("score") or 0) < score:
+            hits[key] = row
+
+    for r in roots:
+        if not r.exists():
+            continue
+        count = 0
+        for path in r.rglob("*"):
+            if count > 1200:
+                break
+            count += 1
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in exts:
+                continue
+            stem = path.stem.lower()
+            name = path.name.lower()
+            compact = re.sub(r"[^a-z0-9]+", "", stem)
+            for t in expanded_tokens:
+                if not t:
+                    continue
+                if t in stem or t in name or t == compact:
+                    add_hit(path, "name_match", 90)
+                    break
+
+    for f in files:
+        if not isinstance(f, str):
+            continue
+        base_name = Path(f).stem.lower()
+        compact = re.sub(r"[^a-z0-9]+", "", base_name)
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in exts:
+                    continue
+                stem = path.stem.lower()
+                st_compact = re.sub(r"[^a-z0-9]+", "", stem)
+                if base_name and (base_name in stem or stem in base_name or (compact and compact == st_compact)):
+                    add_hit(path, "artifact_match", 100)
+
+    rows = sorted(hits.values(), key=lambda x: (-(int(x.get("score") or 0)), str(x.get("relative_path") or "")))
+    return rows[:50]
 
 def _resolve_version_from_dependency(
     client: ModrinthClient,
@@ -812,9 +914,23 @@ def main(argv: List[str]) -> int:
 
         now_ts = time.time()
         for pid, files in downloaded_project_files.items():
+            project_meta: Dict[str, object] = {}
+            try:
+                p_obj = project if pid == project_id else client.get_project(pid)
+                if isinstance(p_obj, dict):
+                    project_meta = p_obj
+            except Exception:
+                project_meta = {}
+
             projects[pid] = {
+                "project_id": pid,
                 "files": files,
                 "installed_at": now_ts,
+                "title": _project_display_name(project_meta, pid),
+                "slug": project_meta.get("slug") if isinstance(project_meta.get("slug"), str) else None,
+                "author": project_meta.get("author") if isinstance(project_meta.get("author"), str) else None,
+                "icon_url": project_meta.get("icon_url") if isinstance(project_meta.get("icon_url"), str) else None,
+                "description": project_meta.get("description") if isinstance(project_meta.get("description"), str) else None,
             }
         _save_modrinth_manifest(server_path, manifest)
 
@@ -853,19 +969,60 @@ def main(argv: List[str]) -> int:
         manifest = _load_modrinth_manifest(server_path)
         projects = _manifest_projects(manifest, project_type)
         project_rows: List[Dict[str, object]] = []
+        client = ModrinthClient()
+        dirty_manifest = False
         for pid, meta in projects.items():
             if not isinstance(pid, str):
                 continue
-            files = meta.get("files") if isinstance(meta, dict) else None
-            installed_at = meta.get("installed_at") if isinstance(meta, dict) else None
+            md = meta if isinstance(meta, dict) else {}
+            files = md.get("files") if isinstance(md.get("files"), list) else []
+            installed_at = md.get("installed_at") if isinstance(md.get("installed_at"), (int, float)) else None
+            title = md.get("title") if isinstance(md.get("title"), str) and str(md.get("title")).strip() else None
+            slug = md.get("slug") if isinstance(md.get("slug"), str) and str(md.get("slug")).strip() else None
+            author = md.get("author") if isinstance(md.get("author"), str) and str(md.get("author")).strip() else None
+            icon_url = md.get("icon_url") if isinstance(md.get("icon_url"), str) and str(md.get("icon_url")).strip() else None
+            description = md.get("description") if isinstance(md.get("description"), str) and str(md.get("description")).strip() else None
+
+            if not title or not icon_url:
+                try:
+                    p_obj = client.get_project(pid)
+                    if isinstance(p_obj, dict):
+                        title = _project_display_name(p_obj, pid)
+                        slug = p_obj.get("slug") if isinstance(p_obj.get("slug"), str) else slug
+                        author = p_obj.get("author") if isinstance(p_obj.get("author"), str) else author
+                        icon_url = p_obj.get("icon_url") if isinstance(p_obj.get("icon_url"), str) else icon_url
+                        description = p_obj.get("description") if isinstance(p_obj.get("description"), str) else description
+                        projects[pid] = {
+                            **md,
+                            "project_id": pid,
+                            "title": title,
+                            "slug": slug,
+                            "author": author,
+                            "icon_url": icon_url,
+                            "description": description,
+                            "files": files,
+                            "installed_at": installed_at,
+                        }
+                        dirty_manifest = True
+                except Exception:
+                    pass
+
             project_rows.append(
                 {
                     "project_id": pid,
                     "project_type": project_type,
-                    "files": files if isinstance(files, list) else [],
-                    "installed_at": installed_at if isinstance(installed_at, (int, float)) else None,
+                    "files": files,
+                    "installed_at": installed_at,
+                    "title": title or pid,
+                    "slug": slug,
+                    "author": author,
+                    "icon_url": icon_url,
+                    "description": description,
                 }
             )
+
+        if dirty_manifest:
+            _save_modrinth_manifest(server_path, manifest)
 
         result(
             "modrinth_list_installed",
@@ -876,6 +1033,88 @@ def main(argv: List[str]) -> int:
                 "projects": project_rows,
             },
         )
+        return 0
+
+    if cmd == "modrinth_config_candidates":
+        if len(argv) < 5:
+            error("Usage: cli.py modrinth_config_candidates <server_folder> <project_type> <project_id>")
+            return 1
+
+        server_folder = argv[2]
+        project_type = argv[3]
+        project_id = argv[4]
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        manifest = _load_modrinth_manifest(server_path)
+        projects = _manifest_projects(manifest, project_type)
+        meta = projects.get(project_id)
+        if not isinstance(meta, dict):
+            error(f"Project {project_id} is not installed")
+            return 1
+
+        candidates = _config_candidates_for_project(server_path, project_type, {"project_id": project_id, **meta})
+        result("modrinth_config_candidates", {"project_id": project_id, "project_type": project_type, "candidates": candidates})
+        return 0
+
+    if cmd == "read_server_text_file":
+        if len(argv) < 4:
+            error("Usage: cli.py read_server_text_file <server_folder> <relative_path>")
+            return 1
+
+        server_folder = argv[2]
+        rel_path = argv[3]
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        target = _safe_server_relative_path(server_path, rel_path)
+        if target is None or not target.exists() or not target.is_file():
+            error("Invalid file path")
+            return 1
+
+        try:
+            content = target.read_text(encoding="utf-8")
+        except Exception:
+            content = target.read_text(encoding="utf-8", errors="replace")
+
+        result("read_server_text_file", {"relative_path": rel_path, "content": content})
+        return 0
+
+    if cmd == "write_server_text_file":
+        if len(argv) < 5:
+            error("Usage: cli.py write_server_text_file <server_folder> <relative_path> <base64_content>")
+            return 1
+
+        server_folder = argv[2]
+        rel_path = argv[3]
+        encoded = argv[4]
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        target = _safe_server_relative_path(server_path, rel_path)
+        if target is None:
+            error("Invalid file path")
+            return 1
+        if not target.exists() or not target.is_file():
+            error("File does not exist")
+            return 1
+
+        try:
+            raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+            content = raw.decode("utf-8")
+        except Exception:
+            error("Invalid base64 content")
+            return 1
+
+        target.write_text(content, encoding="utf-8")
+        result("write_server_text_file", {"relative_path": rel_path, "bytes": len(raw)})
         return 0
 
     if cmd == "modrinth_uninstall_project":
@@ -998,7 +1237,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_config_candidates, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

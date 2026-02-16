@@ -625,6 +625,20 @@ export const styles: Record<string, React.CSSProperties> = {
     justifyContent: "flex-end",
   },
 
+  configEditorArea: {
+    width: "100%",
+    minHeight: 360,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(5,9,18,.92)",
+    color: "rgba(240,249,255,.95)",
+    padding: 10,
+    fontSize: 12,
+    lineHeight: 1.4,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    resize: "vertical",
+  },
+
   detailsMetricsGrid: {
     display: "grid",
     gridTemplateColumns: "repeat(3, minmax(0, 1fr))",

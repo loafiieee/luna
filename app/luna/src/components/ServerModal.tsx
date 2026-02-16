@@ -1187,6 +1187,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const [installedByType, setInstalledByType] = useState<{ primary: InstalledProject[]; datapack: InstalledProject[] }>({ primary: [], datapack: [] });
   const [configPicker, setConfigPicker] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; baseRelative?: string; manual?: boolean; candidates: Array<{ relative_path: string; reason?: string; score?: number }> } | null>(null);
   const [editorState, setEditorState] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; relativePath: string; content: string; dirty: boolean; saving: boolean; fromManual: boolean; justSaved: boolean } | null>(null);
+  const [preferredPrompt, setPreferredPrompt] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; relativePath: string } | null>(null);
 
   const activeProjectType: "plugin" | "mod" | "datapack" = tab === "datapack" ? "datapack" : primaryType;
   const loader = modrinthLoaderForServer(server, activeProjectType);
@@ -1384,28 +1385,31 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     }
   }
 
-  async function maybeSetPreferredConfig(state: NonNullable<typeof editorState>) {
-    if (!state.fromManual || !server.folder) return;
-    const yes = window.confirm(`Always use this config file for ${state.projectTitle}?
-
-${state.relativePath}`);
-    if (!yes) return;
+  async function setPreferredConfig(projectType: "plugin" | "mod" | "datapack", projectId: string, projectTitle: string, relativePath: string) {
+    if (!server.folder) return;
     try {
-      await cli("modrinth_set_preferred_config", server.folder, state.projectType, state.projectId, state.relativePath);
-      addLog("ok", `Saved preferred config file for ${state.projectTitle}.`);
+      await cli("modrinth_set_preferred_config", server.folder, projectType, projectId, relativePath);
+      addLog("ok", `Saved preferred config file for ${projectTitle}.`);
       await refreshInstalled();
     } catch (e: any) {
       addLog("err", `Failed to save preferred config file: ${String(e)}`);
     }
   }
 
-  async function closeEditor() {
+  function closeEditor() {
     if (!editorState) return;
     if (editorState.dirty) {
       addLog("warn", "Please save or discard your config changes before closing.");
       return;
     }
-    await maybeSetPreferredConfig(editorState);
+    if (editorState.fromManual) {
+      setPreferredPrompt({
+        projectType: editorState.projectType,
+        projectId: editorState.projectId,
+        projectTitle: editorState.projectTitle,
+        relativePath: editorState.relativePath,
+      });
+    }
     setEditorState(null);
   }
 
@@ -1543,7 +1547,7 @@ ${state.relativePath}`);
           <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.contentModalHead}>
               <div style={{ fontWeight: 900 }}>Edit config — {editorState.projectTitle}</div>
-              <button type="button" style={btn("ghost")} onClick={() => { void closeEditor(); }} disabled={editorState.dirty}>Close</button>
+              <button type="button" style={btn("ghost")} onClick={() => { void closeEditor(); }} disabled={editorState.dirty || editorState.saving}>Close</button>
             </div>
             <div style={styles.contentModalBody}>
               <div style={styles.contentItemMeta}>{editorState.relativePath}</div>
@@ -1560,6 +1564,35 @@ ${state.relativePath}`);
           </div>
         </div>
       )}
+      {preferredPrompt && (
+        <div style={styles.contentOverlay} onClick={() => setPreferredPrompt(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>Use this config file by default?</div>
+              <button type="button" style={btn("ghost")} onClick={() => setPreferredPrompt(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              <div style={styles.contentItemDesc}>Always use this config file for <strong>{preferredPrompt.projectTitle}</strong>?</div>
+              <div style={styles.contentItemMeta}>{preferredPrompt.relativePath}</div>
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn("ghost")} onClick={() => setPreferredPrompt(null)}>Not now</button>
+              <button
+                type="button"
+                style={btn("primary")}
+                onClick={() => {
+                  const p = preferredPrompt;
+                  setPreferredPrompt(null);
+                  if (p) void setPreferredConfig(p.projectType, p.projectId, p.projectTitle, p.relativePath);
+                }}
+              >
+                Always use this file
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

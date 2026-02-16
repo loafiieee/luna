@@ -7,6 +7,9 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+import zipfile
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from backend.utils.get_versions import *
@@ -15,7 +18,7 @@ from backend.utils.get_reseved_ports import *
 from backend.scripts.server_installer import *
 from backend.scripts.run_server import *
 from backend.scripts.delete_server import *
-from backend.utils.paths import configure_data_root, servers_dir, runtime_state_path, servers_state_path
+from backend.utils.paths import configure_data_root, get_data_root, servers_dir, runtime_state_path, servers_state_path
 from backend.utils.state import STATE
 
 # Modrinth support
@@ -288,6 +291,67 @@ def _config_candidates_for_project(server_path: Path, project_type: str, meta: D
         rows = [r for r in rows if str(r.get("relative_path") or "") != preferred]
         rows.insert(0, {"relative_path": preferred, "reason": "preferred", "score": 1000})
     return rows[:50]
+
+def _backups_root_dir() -> Path:
+    return get_data_root() / "backups"
+
+
+def _backup_server_dir(server_id: str) -> Path:
+    return _backups_root_dir() / str(server_id)
+
+
+def _backup_meta_path(server_id: str, backup_id: str) -> Path:
+    return _backup_server_dir(server_id) / f"{backup_id}.json"
+
+
+def _backup_zip_path(server_id: str, backup_id: str) -> Path:
+    return _backup_server_dir(server_id) / f"{backup_id}.zip"
+
+
+def _list_backups(server_id: str) -> List[Dict[str, object]]:
+    bdir = _backup_server_dir(server_id)
+    if not bdir.exists():
+        return []
+    rows: List[Dict[str, object]] = []
+    for z in sorted(bdir.glob("*.zip"), key=lambda p: p.name, reverse=True):
+        backup_id = z.stem
+        meta_path = _backup_meta_path(server_id, backup_id)
+        meta: Dict[str, object] = {}
+        if meta_path.exists():
+            try:
+                m = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(m, dict):
+                    meta = m
+            except Exception:
+                meta = {}
+        try:
+            st = z.stat()
+        except Exception:
+            continue
+        rows.append(
+            {
+                "backup_id": backup_id,
+                "filename": z.name,
+                "label": meta.get("label") if isinstance(meta.get("label"), str) else None,
+                "created_at": meta.get("created_at") if isinstance(meta.get("created_at"), str) else None,
+                "size_bytes": int(st.st_size),
+                "file_count": int(meta.get("file_count") or 0),
+            }
+        )
+    return rows
+
+
+def _safe_extract_zip(zip_path: Path, out_dir: Path) -> None:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.infolist():
+            name = member.filename
+            if name.startswith("/"):
+                raise ValueError("Invalid backup archive path")
+            target = (out_dir / name).resolve()
+            base = out_dir.resolve()
+            if base not in target.parents and target != base:
+                raise ValueError("Backup archive contains unsafe path")
+        zf.extractall(out_dir)
 
 def _resolve_version_from_dependency(
     client: ModrinthClient,
@@ -1318,6 +1382,159 @@ def main(argv: List[str]) -> int:
         result("modrinth_remove_installed", {"removed": name, "project_type": project_type})
         return 0
 
+    if cmd == "backup_create":
+        if len(argv) < 3:
+            error("Usage: cli.py backup_create <server_id> [--label=label]")
+            return 1
+
+        server_id = argv[2]
+        label: Optional[str] = None
+        for arg in argv[3:]:
+            if arg.startswith("--label="):
+                label = arg.split("=", 1)[1].strip() or None
+            else:
+                error(f"Unknown argument: {arg}")
+                return 1
+
+        try:
+            server = _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        folder = str(server.get("folder") or "")
+        if not folder:
+            error(f"Server {server_id} is missing folder")
+            return 1
+
+        server_path = servers_dir() / folder
+        if not server_path.exists() or not server_path.is_dir():
+            error(f"Server folder {server_path} does not exist")
+            return 1
+
+        backup_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        bdir = _backup_server_dir(server_id)
+        bdir.mkdir(parents=True, exist_ok=True)
+        zpath = _backup_zip_path(server_id, backup_id)
+
+        file_count = 0
+        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in server_path.rglob("*"):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(server_path)
+                zf.write(path, arcname=str(rel))
+                file_count += 1
+
+        meta = {
+            "backup_id": backup_id,
+            "server_id": server_id,
+            "server_name": server.get("name"),
+            "folder": folder,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "file_count": file_count,
+        }
+        _backup_meta_path(server_id, backup_id).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        result("backup_create", {"server_id": server_id, "backup_id": backup_id, "label": label, "file_count": file_count, "size_bytes": zpath.stat().st_size})
+        return 0
+
+    if cmd == "backup_list":
+        if len(argv) < 3:
+            error("Usage: cli.py backup_list <server_id>")
+            return 1
+
+        server_id = argv[2]
+        try:
+            _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        rows = _list_backups(server_id)
+        result("backup_list", {"server_id": server_id, "backups": rows})
+        return 0
+
+    if cmd == "backup_delete":
+        if len(argv) < 4:
+            error("Usage: cli.py backup_delete <server_id> <backup_id>")
+            return 1
+
+        server_id = argv[2]
+        backup_id = argv[3]
+        zpath = _backup_zip_path(server_id, backup_id)
+        mpath = _backup_meta_path(server_id, backup_id)
+
+        if not zpath.exists():
+            error(f"Backup {backup_id} does not exist")
+            return 1
+
+        zpath.unlink()
+        if mpath.exists():
+            mpath.unlink()
+
+        result("backup_delete", {"server_id": server_id, "backup_id": backup_id, "deleted": True})
+        return 0
+
+    if cmd == "backup_restore":
+        if len(argv) < 4:
+            error("Usage: cli.py backup_restore <server_id> <backup_id>")
+            return 1
+
+        server_id = argv[2]
+        backup_id = argv[3]
+
+        try:
+            server = _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        rt = _safe_read_json(runtime_state_path(str(server_id)))
+        state = str((rt or {}).get("state") or "").lower()
+        if state in {"running", "starting"}:
+            error("Stop the server before restoring a backup")
+            return 1
+
+        folder = str(server.get("folder") or "")
+        if not folder:
+            error(f"Server {server_id} is missing folder")
+            return 1
+
+        zpath = _backup_zip_path(server_id, backup_id)
+        if not zpath.exists():
+            error(f"Backup {backup_id} does not exist")
+            return 1
+
+        server_path = servers_dir() / folder
+        server_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(prefix="luna-restore-") as td:
+            temp_root = Path(td)
+            extracted = temp_root / "server"
+            extracted.mkdir(parents=True, exist_ok=True)
+            try:
+                _safe_extract_zip(zpath, extracted)
+            except Exception as e:
+                error(f"Backup extract failed: {e}")
+                return 1
+
+            rollback_path = temp_root / "rollback"
+            try:
+                if server_path.exists():
+                    server_path.rename(rollback_path)
+                extracted.rename(server_path)
+            except Exception as e:
+                # best effort rollback
+                if not server_path.exists() and rollback_path.exists():
+                    rollback_path.rename(server_path)
+                error(f"Restore failed: {e}")
+                return 1
+
+        result("backup_restore", {"server_id": server_id, "backup_id": backup_id, "restored": True})
+        return 0
+
     if cmd == "rename_server":
         if len(argv) < 4:
             error("Usage: cli.py rename_server <server_id> <new_name>")
@@ -1340,7 +1557,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

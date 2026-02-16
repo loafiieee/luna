@@ -321,7 +321,7 @@ async function copyAddress() {
           {tab === "details" && <DetailsPane server={server} />}
           {tab === "console" && <ConsolePane server={server} addLog={addLog} isOnline={isOnline} actionBusy={actionBusy} />}
           {tab === "content" && <ContentPane server={server} addLog={addLog} />}
-          {tab === "backups" && <PlaceholderPane title="Backups" desc="Hook to backup commands later." />}
+          {tab === "backups" && <BackupsPane server={server} addLog={addLog} />}
           {tab === "tunnels" && <TunnelsPane server={server} />}
           {tab === "settings" && <PlaceholderPane title="Settings" desc="server.properties editor + RAM/port, etc." />}
           {tab === "server_folder" && <PlaceholderPane title="Server Folder" desc="Open folder, open logs, etc." />}
@@ -1432,7 +1432,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
                   <div style={styles.contentItemDesc}>{row.description || row.project_id}</div>
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
-                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>{row.preferred_config_path ? "Config" : "Config"}</button>
+                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>{row.preferred_config_path ? "Config (preferred)" : "Config"}</button>
                   <button type="button" style={btn("danger")} disabled={deletingId === key} onClick={() => void uninstallProject(projectType, row.project_id)}>{deletingId === key ? "Deleting…" : "Delete"}</button>
                 </div>
               </div>
@@ -1593,6 +1593,113 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         </div>
       )}
 
+    </div>
+  );
+}
+
+
+function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const [items, setItems] = useState<Array<{ backup_id: string; created_at?: string | null; label?: string | null; size_bytes?: number; file_count?: number }>>([]);
+  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [label, setLabel] = useState("");
+
+  async function refreshBackups() {
+    try {
+      setLoading(true);
+      const res = await cli<any>("backup_list", server.server_id);
+      const rows = Array.isArray(res?.data?.backups) ? res.data.backups : [];
+      setItems(rows);
+    } catch (e: any) {
+      addLog("err", `Failed to load backups: ${String(e)}`);
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshBackups();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.server_id]);
+
+  async function createBackup() {
+    try {
+      setCreating(true);
+      const args = ["backup_create", server.server_id];
+      if (label.trim()) args.push(`--label=${label.trim()}`);
+      await cli<any>(...args);
+      setLabel("");
+      addLog("ok", `Backup created for ${server.name}.`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Backup creation failed: ${String(e)}`);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function restoreBackup(backupId: string) {
+    try {
+      setBusyId(`restore:${backupId}`);
+      await cli("backup_restore", server.server_id, backupId);
+      addLog("ok", `Backup ${backupId} restored.`);
+    } catch (e: any) {
+      addLog("err", `Restore failed for ${backupId}: ${String(e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteBackup(backupId: string) {
+    try {
+      setBusyId(`delete:${backupId}`);
+      await cli("backup_delete", server.server_id, backupId);
+      addLog("ok", `Backup ${backupId} deleted.`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Delete failed for ${backupId}: ${String(e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Backups</div>
+      <div style={styles.contentMeta}>Create, restore, and delete snapshots for this server. Restore requires the server to be stopped.</div>
+
+      <div style={styles.contentSearchRow}>
+        <input style={styles.search} placeholder="Optional backup label…" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <button type="button" style={btn("primary")} disabled={creating} onClick={() => void createBackup()}>{creating ? "Creating…" : "Create Backup"}</button>
+        <button type="button" style={btn("ghost")} disabled={loading} onClick={() => void refreshBackups()}>{loading ? "Refreshing…" : "Refresh"}</button>
+      </div>
+
+      <div style={styles.contentResults}>
+        {items.length === 0 ? (
+          <div style={styles.playersEmpty}>{loading ? "Loading backups…" : "No backups yet."}</div>
+        ) : (
+          items.map((b) => {
+            const restoreBusy = busyId === `restore:${b.backup_id}`;
+            const deleteBusy = busyId === `delete:${b.backup_id}`;
+            const created = b.created_at ? new Date(b.created_at).toLocaleString() : b.backup_id;
+            const sizeMb = typeof b.size_bytes === "number" ? `${(b.size_bytes / (1024 * 1024)).toFixed(2)} MB` : "—";
+            return (
+              <div key={b.backup_id} style={styles.contentItem}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={styles.contentItemTitle}>{b.label?.trim() || b.backup_id}</div>
+                  <div style={styles.contentItemMeta}>{created} • {sizeMb} • {typeof b.file_count === "number" ? `${b.file_count} files` : "file count unknown"}</div>
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <button type="button" style={btn("ghost")} disabled={restoreBusy || deleteBusy} onClick={() => void restoreBackup(b.backup_id)}>{restoreBusy ? "Restoring…" : "Restore"}</button>
+                  <button type="button" style={btn("danger")} disabled={restoreBusy || deleteBusy} onClick={() => void deleteBackup(b.backup_id)}>{deleteBusy ? "Deleting…" : "Delete"}</button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }

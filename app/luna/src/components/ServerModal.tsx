@@ -1168,6 +1168,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     author?: string | null;
     icon_url?: string | null;
     description?: string | null;
+    preferred_config_path?: string | null;
     files: string[];
     installed_at?: number | null;
   };
@@ -1185,7 +1186,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [installedByType, setInstalledByType] = useState<{ primary: InstalledProject[]; datapack: InstalledProject[] }>({ primary: [], datapack: [] });
   const [configPicker, setConfigPicker] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; baseRelative?: string; manual?: boolean; candidates: Array<{ relative_path: string; reason?: string; score?: number }> } | null>(null);
-  const [editorState, setEditorState] = useState<{ projectTitle: string; relativePath: string; content: string; dirty: boolean; saving: boolean } | null>(null);
+  const [editorState, setEditorState] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; relativePath: string; content: string; dirty: boolean; saving: boolean; fromManual: boolean; justSaved: boolean } | null>(null);
 
   const activeProjectType: "plugin" | "mod" | "datapack" = tab === "datapack" ? "datapack" : primaryType;
   const loader = modrinthLoaderForServer(server, activeProjectType);
@@ -1216,6 +1217,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
             author: typeof r.author === "string" ? r.author : null,
             icon_url: typeof r.icon_url === "string" ? r.icon_url : null,
             description: typeof r.description === "string" ? r.description : null,
+            preferred_config_path: typeof r.preferred_config_path === "string" ? r.preferred_config_path : null,
             files: Array.isArray(r.files) ? r.files.map((f: any) => String(f)) : [],
             installed_at: typeof r.installed_at === "number" ? r.installed_at : null,
           }));
@@ -1318,11 +1320,11 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     }
   }
 
-  async function openConfigFile(projectTitle: string, relPath: string) {
+  async function openConfigFile(projectType: "plugin" | "mod" | "datapack", projectId: string, projectTitle: string, relPath: string, fromManual = false) {
     if (!server.folder) return;
     try {
       const res = await cli<any>("read_server_text_file", server.folder, relPath);
-      setEditorState({ projectTitle, relativePath: relPath, content: String(res?.data?.content ?? ""), dirty: false, saving: false });
+      setEditorState({ projectType, projectId, projectTitle, relativePath: relPath, content: String(res?.data?.content ?? ""), dirty: false, saving: false, fromManual, justSaved: false });
       setConfigPicker(null);
     } catch (e: any) {
       addLog("err", `Could not open config file: ${String(e)}`);
@@ -1333,6 +1335,11 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     if (!server.folder) return;
     try {
       const res = await cli<any>("modrinth_config_candidates", server.folder, projectType, projectId);
+      const preferred = typeof res?.data?.preferred_config_path === "string" ? res.data.preferred_config_path : null;
+      if (preferred) {
+        await openConfigFile(projectType, projectId, projectTitle, preferred, false);
+        return;
+      }
       const cands = Array.isArray(res?.data?.candidates) ? res.data.candidates : [];
       if (cands.length === 0) {
         addLog("warn", `Could not auto-detect config for ${projectTitle}. Please choose a file manually.`);
@@ -1354,7 +1361,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         return;
       }
       if (cands.length === 1) {
-        await openConfigFile(projectTitle, String(cands[0].relative_path));
+        await openConfigFile(projectType, projectId, projectTitle, String(cands[0].relative_path), false);
         return;
       }
       setConfigPicker({ projectType, projectId, projectTitle, candidates: cands.map((c: any) => ({ relative_path: String(c.relative_path), reason: c.reason, score: c.score })) });
@@ -1369,12 +1376,37 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       setEditorState((prev) => (prev ? { ...prev, saving: true } : prev));
       const encoded = utf8ToBase64(editorState.content);
       await cli("write_server_text_file", server.folder, editorState.relativePath, encoded);
-      setEditorState((prev) => (prev ? { ...prev, saving: false, dirty: false } : prev));
+      setEditorState((prev) => (prev ? { ...prev, saving: false, dirty: false, justSaved: true } : prev));
       addLog("ok", `Saved ${editorState.relativePath}.`);
     } catch (e: any) {
       setEditorState((prev) => (prev ? { ...prev, saving: false } : prev));
       addLog("err", `Failed saving file: ${String(e)}`);
     }
+  }
+
+  async function maybeSetPreferredConfig(state: NonNullable<typeof editorState>) {
+    if (!state.fromManual || !server.folder) return;
+    const yes = window.confirm(`Always use this config file for ${state.projectTitle}?
+
+${state.relativePath}`);
+    if (!yes) return;
+    try {
+      await cli("modrinth_set_preferred_config", server.folder, state.projectType, state.projectId, state.relativePath);
+      addLog("ok", `Saved preferred config file for ${state.projectTitle}.`);
+      await refreshInstalled();
+    } catch (e: any) {
+      addLog("err", `Failed to save preferred config file: ${String(e)}`);
+    }
+  }
+
+  async function closeEditor() {
+    if (!editorState) return;
+    if (editorState.dirty) {
+      addLog("warn", "Please save or discard your config changes before closing.");
+      return;
+    }
+    await maybeSetPreferredConfig(editorState);
+    setEditorState(null);
   }
 
   function renderInstalledSection(label: string, projectType: "plugin" | "mod" | "datapack", rows: InstalledProject[]) {
@@ -1396,7 +1428,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
                   <div style={styles.contentItemDesc}>{row.description || row.project_id}</div>
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
-                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>Config</button>
+                  <button type="button" style={btn("ghost")} onClick={() => void openConfigPicker(projectType, row.project_id, row.title || row.project_id)}>{row.preferred_config_path ? "Config (preferred)" : "Config"}</button>
                   <button type="button" style={btn("danger")} disabled={deletingId === key} onClick={() => void uninstallProject(projectType, row.project_id)}>{deletingId === key ? "Deleting…" : "Delete"}</button>
                 </div>
               </div>
@@ -1494,7 +1526,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
             <div style={styles.contentModalBody}>
               {configPicker.manual && <div style={styles.contentItemMeta}>Could not auto-detect config. Select a file from {configPicker.baseRelative ?? "the expected directory"}.</div>}
               {configPicker.candidates.map((c) => (
-                <button key={c.relative_path} type="button" style={{ ...styles.contentItem, cursor: "pointer" }} onClick={() => void openConfigFile(configPicker.projectTitle, c.relative_path)}>
+                <button key={c.relative_path} type="button" style={styles.contentPickerBtn} onClick={() => void openConfigFile(configPicker.projectType, configPicker.projectId, configPicker.projectTitle, c.relative_path, Boolean(configPicker.manual))}>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={styles.contentItemTitle}>{c.relative_path}</div>
                     <div style={styles.contentItemMeta}>{c.reason ?? "match"}{typeof c.score === "number" ? ` • score ${c.score}` : ""}</div>
@@ -1507,18 +1539,19 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       )}
 
       {editorState && (
-        <div style={styles.contentOverlay} onClick={() => setEditorState((prev) => (prev?.dirty ? prev : null))}>
+        <div style={styles.contentOverlay} onClick={() => { void closeEditor(); }}>
           <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.contentModalHead}>
               <div style={{ fontWeight: 900 }}>Edit config — {editorState.projectTitle}</div>
-              <button type="button" style={btn("ghost")} onClick={() => setEditorState((prev) => (prev?.dirty ? prev : null))} disabled={editorState.dirty}>Close</button>
+              <button type="button" style={btn("ghost")} onClick={() => { void closeEditor(); }} disabled={editorState.dirty}>Close</button>
             </div>
             <div style={styles.contentModalBody}>
               <div style={styles.contentItemMeta}>{editorState.relativePath}</div>
+              {editorState.justSaved && <div style={styles.contentSaveOk}>Saved.</div>}
               <textarea
                 style={styles.configEditorArea}
                 value={editorState.content}
-                onChange={(e) => setEditorState((prev) => (prev ? { ...prev, content: e.target.value, dirty: true } : prev))}
+                onChange={(e) => setEditorState((prev) => (prev ? { ...prev, content: e.target.value, dirty: true, justSaved: false } : prev))}
               />
             </div>
             <div style={styles.contentModalActions}>

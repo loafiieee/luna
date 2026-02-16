@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -72,6 +73,69 @@ def _resolve_modrinth_download_dir(server_path: Path, project_type: str) -> Path
     return plugins_dir
 
 
+def _modrinth_manifest_path(server_path: Path) -> Path:
+    return server_path / ".luna" / "modrinth_installed.json"
+
+
+def _load_modrinth_manifest(server_path: Path) -> Dict[str, object]:
+    path = _modrinth_manifest_path(server_path)
+    if not path.exists():
+        return {"project_types": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"project_types": {}}
+
+
+def _save_modrinth_manifest(server_path: Path, data: Dict[str, object]) -> None:
+    path = _modrinth_manifest_path(server_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _manifest_projects(manifest: Dict[str, object], project_type: str) -> Dict[str, object]:
+    pt = manifest.setdefault("project_types", {})
+    if not isinstance(pt, dict):
+        manifest["project_types"] = {}
+        pt = manifest["project_types"]
+    bucket = pt.setdefault(project_type, {})
+    if not isinstance(bucket, dict):
+        pt[project_type] = {}
+        bucket = pt[project_type]
+    projects = bucket.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        bucket["projects"] = {}
+        projects = bucket["projects"]
+    return projects
+
+
+def _list_installed_entries(server_path: Path, project_type: str) -> List[Dict[str, object]]:
+    base = _resolve_modrinth_download_dir(server_path, project_type)
+    if not base.exists():
+        return []
+    entries: List[Dict[str, object]] = []
+    for child in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+        if project_type in {"plugin", "mod"} and child.is_file() and child.suffix.lower() != ".jar":
+            continue
+        if project_type == "datapack":
+            if child.is_file() and child.suffix.lower() != ".zip":
+                continue
+        try:
+            st = child.stat()
+            entries.append({
+                "name": child.name,
+                "path": str(child),
+                "is_dir": child.is_dir(),
+                "size": int(st.st_size),
+                "modified": float(st.st_mtime),
+            })
+        except Exception:
+            continue
+    return entries
+
 def _resolve_version_from_dependency(
     client: ModrinthClient,
     dep: Dict[str, str],
@@ -108,8 +172,9 @@ def _download_with_required_dependencies(
     out_dir: Path,
     loaders: List[str],
     game_versions: List[str],
-) -> List[Path]:
+) -> Tuple[List[Path], Dict[str, List[str]]]:
     downloaded: List[Path] = []
+    downloaded_project_files: Dict[str, List[str]] = {}
     visited_projects: Set[str] = set()
     queue: List[Tuple[str, Dict[str, object]]] = [(root_project_id, root_version)]
 
@@ -121,7 +186,9 @@ def _download_with_required_dependencies(
 
         selection = client.pick_download_file(version)
         info(f"Downloading {project_id}: {selection.filename}...")
-        downloaded.append(client.download_version_file(version, out_dir))
+        out_path = client.download_version_file(version, out_dir)
+        downloaded.append(out_path)
+        downloaded_project_files.setdefault(project_id, []).append(out_path.name)
 
         dependencies = version.get("dependencies")
         if not isinstance(dependencies, list):
@@ -148,7 +215,7 @@ def _download_with_required_dependencies(
                 continue
             queue.append((dep_project_id, dep_version))
 
-    return downloaded
+    return downloaded, downloaded_project_files
 
 
 
@@ -632,7 +699,7 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
-        print(results)
+        result("modrinth_search", results)
         return 0
 
     if cmd == "modrinth_project":
@@ -648,7 +715,7 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
-        print(project)
+        result("modrinth_project", project)
         return 0
 
     if cmd == "modrinth_download":
@@ -707,8 +774,26 @@ def main(argv: List[str]) -> int:
 
         out_dir = _resolve_modrinth_download_dir(server_path, project_type or "")
 
+        manifest = _load_modrinth_manifest(server_path)
+        projects = _manifest_projects(manifest, project_type or "plugin")
+        existing = projects.get(project_id)
+        if isinstance(existing, dict):
+            recorded_files = existing.get("files")
+            if isinstance(recorded_files, list) and all((out_dir / str(f)).exists() for f in recorded_files if isinstance(f, str)):
+                result(
+                    "modrinth_download",
+                    {
+                        "project_id": project_id,
+                        "project_type": project_type,
+                        "downloaded_files": [],
+                        "count": 0,
+                        "already_installed": True,
+                    },
+                )
+                return 0
+
         try:
-            downloaded = _download_with_required_dependencies(
+            downloaded, downloaded_project_files = _download_with_required_dependencies(
                 client,
                 root_project_id=project_id,
                 root_version=latest_version,
@@ -720,10 +805,177 @@ def main(argv: List[str]) -> int:
             error(str(e))
             return 1
 
+        downloaded_paths: List[str] = []
         for out_file in downloaded:
             info(f"Downloaded {out_file} successfully.")
+            downloaded_paths.append(str(out_file))
+
+        now_ts = time.time()
+        for pid, files in downloaded_project_files.items():
+            projects[pid] = {
+                "files": files,
+                "installed_at": now_ts,
+            }
+        _save_modrinth_manifest(server_path, manifest)
+
+        result(
+            "modrinth_download",
+            {
+                "project_id": project_id,
+                "project_type": project_type,
+                "downloaded_files": downloaded_paths,
+                "count": len(downloaded_paths),
+                "already_installed": False,
+            },
+        )
         return 0
     
+    if cmd == "modrinth_list_installed":
+        if len(argv) < 3:
+            error("Usage: cli.py modrinth_list_installed <server_folder> [--project_type=plugin|mod|datapack]")
+            return 1
+
+        server_folder = argv[2]
+        project_type = "plugin"
+        for arg in argv[3:]:
+            if arg.startswith("--project_type="):
+                project_type = arg.split("=", 1)[1]
+            else:
+                error(f"Unknown argument: {arg}")
+                return 1
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        entries = _list_installed_entries(server_path, project_type)
+        manifest = _load_modrinth_manifest(server_path)
+        projects = _manifest_projects(manifest, project_type)
+        project_rows: List[Dict[str, object]] = []
+        for pid, meta in projects.items():
+            if not isinstance(pid, str):
+                continue
+            files = meta.get("files") if isinstance(meta, dict) else None
+            installed_at = meta.get("installed_at") if isinstance(meta, dict) else None
+            project_rows.append(
+                {
+                    "project_id": pid,
+                    "project_type": project_type,
+                    "files": files if isinstance(files, list) else [],
+                    "installed_at": installed_at if isinstance(installed_at, (int, float)) else None,
+                }
+            )
+
+        result(
+            "modrinth_list_installed",
+            {
+                "project_type": project_type,
+                "entries": entries,
+                "installed_project_ids": list(projects.keys()),
+                "projects": project_rows,
+            },
+        )
+        return 0
+
+    if cmd == "modrinth_uninstall_project":
+        if len(argv) < 5:
+            error("Usage: cli.py modrinth_uninstall_project <server_folder> <project_type> <project_id>")
+            return 1
+
+        server_folder = argv[2]
+        project_type = argv[3]
+        project_id = argv[4]
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        manifest = _load_modrinth_manifest(server_path)
+        projects = _manifest_projects(manifest, project_type)
+        meta = projects.get(project_id)
+        if not isinstance(meta, dict):
+            error(f"Project {project_id} is not installed")
+            return 1
+
+        out_dir = _resolve_modrinth_download_dir(server_path, project_type)
+        removed_files: List[str] = []
+        files = meta.get("files")
+        if isinstance(files, list):
+            for f in files:
+                if not isinstance(f, str):
+                    continue
+                target = (out_dir / f).resolve()
+                base = out_dir.resolve()
+                if base not in target.parents and target != base:
+                    continue
+                if target.exists():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                    removed_files.append(f)
+
+        projects.pop(project_id, None)
+        _save_modrinth_manifest(server_path, manifest)
+
+        result(
+            "modrinth_uninstall_project",
+            {
+                "project_id": project_id,
+                "project_type": project_type,
+                "removed_files": removed_files,
+                "count": len(removed_files),
+            },
+        )
+        return 0
+
+    if cmd == "modrinth_remove_installed":
+        if len(argv) < 5:
+            error("Usage: cli.py modrinth_remove_installed <server_folder> <project_type> <name>")
+            return 1
+
+        server_folder = argv[2]
+        project_type = argv[3]
+        name = argv[4]
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        base = _resolve_modrinth_download_dir(server_path, project_type)
+        target = (base / name).resolve()
+        base_resolved = base.resolve()
+        if base_resolved not in target.parents and target != base_resolved:
+            error("Invalid content path")
+            return 1
+        if not target.exists():
+            error(f"Content item {name} does not exist")
+            return 1
+
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+
+        manifest = _load_modrinth_manifest(server_path)
+        projects = _manifest_projects(manifest, project_type)
+        to_delete = []
+        for pid, meta in projects.items():
+            if not isinstance(meta, dict):
+                continue
+            files = meta.get("files")
+            if isinstance(files, list) and any(str(f) == name for f in files):
+                to_delete.append(pid)
+        for pid in to_delete:
+            projects.pop(pid, None)
+        _save_modrinth_manifest(server_path, manifest)
+
+        result("modrinth_remove_installed", {"removed": name, "project_type": project_type})
+        return 0
+
     if cmd == "rename_server":
         if len(argv) < 4:
             error("Usage: cli.py rename_server <server_id> <new_name>")
@@ -746,7 +998,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

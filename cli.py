@@ -159,6 +159,43 @@ def _safe_server_relative_path(server_path: Path, rel_path: str) -> Optional[Pat
     return target
 
 
+def _config_base_dir(server_path: Path, project_type: str) -> Path:
+    if project_type == "plugin":
+        return server_path / "plugins"
+    if project_type == "mod":
+        return server_path / "config"
+    if project_type == "datapack":
+        return server_path / "world" / "datapacks"
+    return server_path / "config"
+
+
+def _browse_config_files(server_path: Path, project_type: str) -> Dict[str, object]:
+    base_dir = _config_base_dir(server_path, project_type)
+    exts = {".yml", ".yaml", ".json", ".toml", ".cfg", ".conf", ".properties", ".txt", ".ini", ".mcmeta"}
+    files: List[Dict[str, object]] = []
+
+    if not base_dir.exists():
+        return {"base_relative": str(base_dir.relative_to(server_path)), "files": []}
+
+    count = 0
+    for path in base_dir.rglob("*"):
+        if count > 2500:
+            break
+        count += 1
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in exts:
+            continue
+        try:
+            rel = path.resolve().relative_to(server_path.resolve())
+            files.append({"relative_path": str(rel)})
+        except Exception:
+            continue
+
+    files.sort(key=lambda x: str(x.get("relative_path") or ""))
+    return {"base_relative": str(base_dir.relative_to(server_path)), "files": files[:500]}
+
+
 def _config_candidates_for_project(server_path: Path, project_type: str, meta: Dict[str, object]) -> List[Dict[str, object]]:
     project_id = str(meta.get("project_id") or "")
     slug = str(meta.get("slug") or "")
@@ -1035,6 +1072,23 @@ def main(argv: List[str]) -> int:
         )
         return 0
 
+    if cmd == "modrinth_browse_config_files":
+        if len(argv) < 4:
+            error("Usage: cli.py modrinth_browse_config_files <server_folder> <project_type>")
+            return 1
+
+        server_folder = argv[2]
+        project_type = argv[3]
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        payload = _browse_config_files(server_path, project_type)
+        result("modrinth_browse_config_files", payload)
+        return 0
+
     if cmd == "modrinth_config_candidates":
         if len(argv) < 5:
             error("Usage: cli.py modrinth_config_candidates <server_folder> <project_type> <project_id>")
@@ -1237,7 +1291,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_config_candidates, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

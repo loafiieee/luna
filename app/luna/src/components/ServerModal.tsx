@@ -1600,21 +1600,29 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 
 function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
   const [items, setItems] = useState<Array<{ backup_id: string; created_at?: string | null; label?: string | null; size_bytes?: number; file_count?: number }>>([]);
+  const [schedule, setSchedule] = useState<{ enabled: boolean; interval_minutes: number; keep_latest: number; label_prefix: string; next_run_at?: string | null; last_run_at?: string | null; last_error?: string | null } | null>(null);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [runningScheduleNow, setRunningScheduleNow] = useState(false);
   const [label, setLabel] = useState("");
   const [confirmAction, setConfirmAction] = useState<{ type: "restore" | "delete"; backupId: string; backupLabel: string } | null>(null);
 
   async function refreshBackups() {
     try {
       setLoading(true);
-      const res = await cli<any>("backup_list", server.server_id);
+      const [res, scheduleRes] = await Promise.all([
+        cli<any>("backup_list", server.server_id),
+        cli<any>("backup_schedule_get", server.server_id),
+      ]);
       const rows = Array.isArray(res?.data?.backups) ? res.data.backups : [];
       setItems(rows);
+      setSchedule(scheduleRes?.data?.schedule ?? null);
     } catch (e: any) {
       addLog("err", `Failed to load backups: ${String(e)}`);
       setItems([]);
+      setSchedule(null);
     } finally {
       setLoading(false);
     }
@@ -1669,6 +1677,41 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
     }
   }
 
+  async function saveSchedule() {
+    if (!schedule) return;
+    try {
+      setSavingSchedule(true);
+      await cli(
+        "backup_schedule_set",
+        server.server_id,
+        `--enabled=${schedule.enabled ? "true" : "false"}`,
+        `--interval-minutes=${Math.max(5, Number(schedule.interval_minutes) || 60)}`,
+        `--keep-latest=${Math.max(1, Number(schedule.keep_latest) || 10)}`,
+        `--label-prefix=${(schedule.label_prefix || "Scheduled").trim() || "Scheduled"}`,
+      );
+      addLog("ok", `Scheduled backups updated for ${server.name}.`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Failed to save backup schedule: ${String(e)}`);
+    } finally {
+      setSavingSchedule(false);
+    }
+  }
+
+  async function runScheduledNow() {
+    try {
+      setRunningScheduleNow(true);
+      const res = await cli<any>("backup_schedule_run", server.server_id);
+      if (res?.data?.ran) addLog("ok", "Scheduled backup created now.");
+      else addLog("info", `Scheduled backup did not run (${String(res?.data?.reason || "not due")}).`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Failed to run scheduled backup: ${String(e)}`);
+    } finally {
+      setRunningScheduleNow(false);
+    }
+  }
+
   return (
     <div>
       <div style={styles.paneTitle}>Backups</div>
@@ -1678,6 +1721,52 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         <input style={styles.search} placeholder="Optional backup label…" value={label} onChange={(e) => setLabel(e.target.value)} />
         <button type="button" style={btn("primary")} disabled={creating} onClick={() => void createBackup()}>{creating ? "Creating…" : "Create Backup"}</button>
         <button type="button" style={btn("ghost")} disabled={loading} onClick={() => void refreshBackups()}>{loading ? "Refreshing…" : "Refresh"}</button>
+      </div>
+
+      <div style={{ ...styles.contentItem, marginBottom: 10, alignItems: "end" }}>
+        <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 8 }}>
+          <div style={styles.contentItemTitle}>Scheduled backups</div>
+          <div style={styles.contentItemMeta}>Enable automatic backups with retention cleanup.</div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={Boolean(schedule?.enabled)}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { interval_minutes: 60, keep_latest: 10, label_prefix: "Scheduled" }), enabled: e.target.checked } as any))}
+            />
+            <span>Enabled</span>
+          </label>
+          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))" }}>
+            <input
+              style={styles.search}
+              type="number"
+              min={5}
+              value={schedule?.interval_minutes ?? 60}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, keep_latest: 10, label_prefix: "Scheduled" }), interval_minutes: Number(e.target.value) || 60 } as any))}
+              placeholder="Interval (minutes)"
+            />
+            <input
+              style={styles.search}
+              type="number"
+              min={1}
+              value={schedule?.keep_latest ?? 10}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, interval_minutes: 60, label_prefix: "Scheduled" }), keep_latest: Number(e.target.value) || 10 } as any))}
+              placeholder="Keep latest"
+            />
+            <input
+              style={styles.search}
+              value={schedule?.label_prefix ?? "Scheduled"}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, interval_minutes: 60, keep_latest: 10 }), label_prefix: e.target.value } as any))}
+              placeholder="Label prefix"
+            />
+          </div>
+          {schedule?.next_run_at && <div style={styles.contentItemMeta}>Next run: {new Date(schedule.next_run_at).toLocaleString()}</div>}
+          {schedule?.last_run_at && <div style={styles.contentItemMeta}>Last run: {new Date(schedule.last_run_at).toLocaleString()}</div>}
+          {schedule?.last_error && <div style={{ ...styles.contentItemMeta, color: "#ff9a9a" }}>Last error: {schedule.last_error}</div>}
+        </div>
+        <div style={{ display: "grid", gap: 6 }}>
+          <button type="button" style={btn("primary")} disabled={savingSchedule || !schedule} onClick={() => void saveSchedule()}>{savingSchedule ? "Saving…" : "Save Schedule"}</button>
+          <button type="button" style={btn("ghost")} disabled={runningScheduleNow} onClick={() => void runScheduledNow()}>{runningScheduleNow ? "Running…" : "Run Due Now"}</button>
+        </div>
       </div>
 
       <div style={styles.contentResults}>

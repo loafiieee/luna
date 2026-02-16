@@ -526,6 +526,7 @@ export const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     gap: 10,
     alignItems: "flex-start",
+    color: "rgba(245,251,255,.95)",
   },
 
   contentThumbWrap: {
@@ -566,6 +567,27 @@ export const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     opacity: 0.72,
     fontWeight: 700,
+  },
+
+  contentPickerBtn: {
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "flex-start",
+    cursor: "pointer",
+    color: "rgba(245,251,255,.95)",
+    textAlign: "left",
+  },
+
+  contentSaveOk: {
+    marginTop: 4,
+    fontSize: 11,
+    fontWeight: 900,
+    color: "rgba(74,222,128,.95)",
   },
 
   contentItemDesc: {

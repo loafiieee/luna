@@ -159,6 +159,16 @@ def _safe_server_relative_path(server_path: Path, rel_path: str) -> Optional[Pat
     return target
 
 
+def _get_preferred_config_path(meta: Dict[str, object], server_path: Path) -> Optional[str]:
+    pref = meta.get("preferred_config_path")
+    if not isinstance(pref, str) or not pref.strip():
+        return None
+    target = _safe_server_relative_path(server_path, pref)
+    if target is None or not target.exists() or not target.is_file():
+        return None
+    return pref
+
+
 def _config_base_dir(server_path: Path, project_type: str) -> Path:
     if project_type == "plugin":
         return server_path / "plugins"
@@ -273,6 +283,10 @@ def _config_candidates_for_project(server_path: Path, project_type: str, meta: D
                     add_hit(path, "artifact_match", 100)
 
     rows = sorted(hits.values(), key=lambda x: (-(int(x.get("score") or 0)), str(x.get("relative_path") or "")))
+    preferred = _get_preferred_config_path(meta, server_path)
+    if preferred:
+        rows = [r for r in rows if str(r.get("relative_path") or "") != preferred]
+        rows.insert(0, {"relative_path": preferred, "reason": "preferred", "score": 1000})
     return rows[:50]
 
 def _resolve_version_from_dependency(
@@ -1055,6 +1069,7 @@ def main(argv: List[str]) -> int:
                     "author": author,
                     "icon_url": icon_url,
                     "description": description,
+                    "preferred_config_path": md.get("preferred_config_path") if isinstance(md.get("preferred_config_path"), str) else None,
                 }
             )
 
@@ -1110,8 +1125,42 @@ def main(argv: List[str]) -> int:
             error(f"Project {project_id} is not installed")
             return 1
 
-        candidates = _config_candidates_for_project(server_path, project_type, {"project_id": project_id, **meta})
-        result("modrinth_config_candidates", {"project_id": project_id, "project_type": project_type, "candidates": candidates})
+        merged_meta = {"project_id": project_id, **meta}
+        candidates = _config_candidates_for_project(server_path, project_type, merged_meta)
+        preferred = _get_preferred_config_path(merged_meta, server_path)
+        result("modrinth_config_candidates", {"project_id": project_id, "project_type": project_type, "preferred_config_path": preferred, "candidates": candidates})
+        return 0
+
+    if cmd == "modrinth_set_preferred_config":
+        if len(argv) < 6:
+            error("Usage: cli.py modrinth_set_preferred_config <server_folder> <project_type> <project_id> <relative_path>")
+            return 1
+
+        server_folder = argv[2]
+        project_type = argv[3]
+        project_id = argv[4]
+        rel_path = argv[5]
+
+        server_path = Path("servers") / server_folder
+        if not server_path.exists():
+            error(f"Server folder {server_path} does not exist.")
+            return 1
+
+        target = _safe_server_relative_path(server_path, rel_path)
+        if target is None or not target.exists() or not target.is_file():
+            error("Invalid config file path")
+            return 1
+
+        manifest = _load_modrinth_manifest(server_path)
+        projects = _manifest_projects(manifest, project_type)
+        meta = projects.get(project_id)
+        if not isinstance(meta, dict):
+            error(f"Project {project_id} is not installed")
+            return 1
+
+        projects[project_id] = {**meta, "preferred_config_path": rel_path}
+        _save_modrinth_manifest(server_path, manifest)
+        result("modrinth_set_preferred_config", {"project_id": project_id, "project_type": project_type, "preferred_config_path": rel_path})
         return 0
 
     if cmd == "read_server_text_file":
@@ -1291,7 +1340,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

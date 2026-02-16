@@ -1604,6 +1604,7 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [label, setLabel] = useState("");
+  const [confirmAction, setConfirmAction] = useState<{ type: "restore" | "delete"; backupId: string; backupLabel: string } | null>(null);
 
   async function refreshBackups() {
     try {
@@ -1643,7 +1644,10 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   async function restoreBackup(backupId: string) {
     try {
       setBusyId(`restore:${backupId}`);
-      await cli("backup_restore", server.server_id, backupId);
+      const res = await cli<any>("backup_restore", server.server_id, backupId);
+      if (Boolean(res?.data?.auto_stopped)) {
+        addLog("warn", `Server was running and was stopped automatically before restore.`);
+      }
       addLog("ok", `Backup ${backupId} restored.`);
     } catch (e: any) {
       addLog("err", `Restore failed for ${backupId}: ${String(e)}`);
@@ -1668,7 +1672,7 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   return (
     <div>
       <div style={styles.paneTitle}>Backups</div>
-      <div style={styles.contentMeta}>Create, restore, and delete snapshots for this server. Restore requires the server to be stopped.</div>
+      <div style={styles.contentMeta}>Create, restore, and delete snapshots for this server. Restore will automatically stop a running server first.</div>
 
       <div style={styles.contentSearchRow}>
         <input style={styles.search} placeholder="Optional backup label…" value={label} onChange={(e) => setLabel(e.target.value)} />
@@ -1685,21 +1689,57 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
             const deleteBusy = busyId === `delete:${b.backup_id}`;
             const created = b.created_at ? new Date(b.created_at).toLocaleString() : b.backup_id;
             const sizeMb = typeof b.size_bytes === "number" ? `${(b.size_bytes / (1024 * 1024)).toFixed(2)} MB` : "—";
+            const displayLabel = b.label?.trim() || b.backup_id;
             return (
               <div key={b.backup_id} style={styles.contentItem}>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={styles.contentItemTitle}>{b.label?.trim() || b.backup_id}</div>
+                  <div style={styles.contentItemTitle}>{displayLabel}</div>
                   <div style={styles.contentItemMeta}>{created} • {sizeMb} • {typeof b.file_count === "number" ? `${b.file_count} files` : "file count unknown"}</div>
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
-                  <button type="button" style={btn("ghost")} disabled={restoreBusy || deleteBusy} onClick={() => void restoreBackup(b.backup_id)}>{restoreBusy ? "Restoring…" : "Restore"}</button>
-                  <button type="button" style={btn("danger")} disabled={restoreBusy || deleteBusy} onClick={() => void deleteBackup(b.backup_id)}>{deleteBusy ? "Deleting…" : "Delete"}</button>
+                  <button type="button" style={btn("ghost")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "restore", backupId: b.backup_id, backupLabel: displayLabel })}>{restoreBusy ? "Restoring…" : "Restore"}</button>
+                  <button type="button" style={btn("danger")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "delete", backupId: b.backup_id, backupLabel: displayLabel })}>{deleteBusy ? "Deleting…" : "Delete"}</button>
                 </div>
               </div>
             );
           })
         )}
       </div>
+
+      {confirmAction && (
+        <div style={styles.contentOverlay} onClick={() => setConfirmAction(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>{confirmAction.type === "restore" ? "Restore backup?" : "Delete backup?"}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setConfirmAction(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              <div style={styles.contentItemDesc}>{confirmAction.backupLabel}</div>
+              <div style={styles.contentItemMeta}>
+                {confirmAction.type === "restore"
+                  ? "Current server files will be replaced. If running, the server will be stopped automatically before restore."
+                  : "This backup archive and metadata will be removed permanently."}
+              </div>
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn("ghost")} onClick={() => setConfirmAction(null)}>Cancel</button>
+              <button
+                type="button"
+                style={btn(confirmAction.type === "restore" ? "primary" : "danger")}
+                onClick={() => {
+                  const action = confirmAction;
+                  setConfirmAction(null);
+                  if (!action) return;
+                  if (action.type === "restore") void restoreBackup(action.backupId);
+                  else void deleteBackup(action.backupId);
+                }}
+              >
+                {confirmAction.type === "restore" ? "Restore" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

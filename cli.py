@@ -1493,9 +1493,20 @@ def main(argv: List[str]) -> int:
 
         rt = _safe_read_json(runtime_state_path(str(server_id)))
         state = str((rt or {}).get("state") or "").lower()
+        auto_stopped = False
         if state in {"running", "starting"}:
-            error("Stop the server before restoring a backup")
-            return 1
+            info(f"Server {server_id} is {state}; attempting graceful stop before restore…")
+            try:
+                auto_stopped = bool(stop_server(server_id=server_id, timeout_s=30.0))
+            except Exception as e:
+                error(f"Failed stopping server before restore: {e}")
+                return 1
+
+            rt_after = _safe_read_json(runtime_state_path(str(server_id)))
+            state_after = str((rt_after or {}).get("state") or "").lower()
+            if state_after in {"running", "starting"}:
+                error("Server is still running; restore aborted")
+                return 1
 
         folder = str(server.get("folder") or "")
         if not folder:
@@ -1532,7 +1543,7 @@ def main(argv: List[str]) -> int:
                 error(f"Restore failed: {e}")
                 return 1
 
-        result("backup_restore", {"server_id": server_id, "backup_id": backup_id, "restored": True})
+        result("backup_restore", {"server_id": server_id, "backup_id": backup_id, "restored": True, "auto_stopped": auto_stopped})
         return 0
 
     if cmd == "rename_server":

@@ -9,7 +9,7 @@ import sys
 import time
 import tempfile
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from backend.utils.get_versions import *
@@ -308,6 +308,68 @@ def _backup_zip_path(server_id: str, backup_id: str) -> Path:
     return _backup_server_dir(server_id) / f"{backup_id}.zip"
 
 
+def _backup_schedule_path(server_id: str) -> Path:
+    return _backup_server_dir(server_id) / "schedule.json"
+
+
+def _backup_schedule_defaults() -> Dict[str, object]:
+    return {
+        "enabled": False,
+        "interval_minutes": 60,
+        "keep_latest": 10,
+        "label_prefix": "Scheduled",
+        "next_run_at": None,
+        "last_run_at": None,
+        "last_backup_id": None,
+        "last_error": None,
+    }
+
+
+def _normalize_backup_schedule(data: Dict[str, object]) -> Dict[str, object]:
+    schedule = _backup_schedule_defaults()
+    schedule["enabled"] = bool(data.get("enabled"))
+    try:
+        schedule["interval_minutes"] = max(5, int(data.get("interval_minutes") or 60))
+    except Exception:
+        schedule["interval_minutes"] = 60
+    try:
+        schedule["keep_latest"] = max(1, int(data.get("keep_latest") or 10))
+    except Exception:
+        schedule["keep_latest"] = 10
+
+    prefix = data.get("label_prefix")
+    schedule["label_prefix"] = str(prefix).strip() if isinstance(prefix, str) and str(prefix).strip() else "Scheduled"
+
+    for key in ("next_run_at", "last_run_at", "last_backup_id", "last_error"):
+        v = data.get(key)
+        schedule[key] = v if isinstance(v, str) and v.strip() else None
+    return schedule
+
+
+def _load_backup_schedule(server_id: str) -> Dict[str, object]:
+    spath = _backup_schedule_path(server_id)
+    if not spath.exists():
+        return _backup_schedule_defaults()
+    try:
+        raw = json.loads(spath.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return _normalize_backup_schedule(raw)
+    except Exception:
+        pass
+    return _backup_schedule_defaults()
+
+
+def _save_backup_schedule(server_id: str, schedule: Dict[str, object]) -> None:
+    normalized = _normalize_backup_schedule(schedule)
+    bdir = _backup_server_dir(server_id)
+    bdir.mkdir(parents=True, exist_ok=True)
+    _backup_schedule_path(server_id).write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _next_schedule_time(interval_minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=max(5, interval_minutes))).isoformat()
+
+
 def _list_backups(server_id: str) -> List[Dict[str, object]]:
     bdir = _backup_server_dir(server_id)
     if not bdir.exists():
@@ -339,6 +401,139 @@ def _list_backups(server_id: str) -> List[Dict[str, object]]:
             }
         )
     return rows
+
+
+def _create_backup(server_id: str, *, label: Optional[str] = None) -> Dict[str, object]:
+    server = _find_server_by_id(server_id)
+    folder = str(server.get("folder") or "")
+    if not folder:
+        raise ValueError(f"Server {server_id} is missing folder")
+
+    server_path = servers_dir() / folder
+    if not server_path.exists() or not server_path.is_dir():
+        raise ValueError(f"Server folder {server_path} does not exist")
+
+    backup_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    bdir = _backup_server_dir(server_id)
+    bdir.mkdir(parents=True, exist_ok=True)
+    zpath = _backup_zip_path(server_id, backup_id)
+
+    file_count = 0
+    with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in server_path.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(server_path)
+            zf.write(path, arcname=str(rel))
+            file_count += 1
+
+    meta = {
+        "backup_id": backup_id,
+        "server_id": server_id,
+        "server_name": server.get("name"),
+        "folder": folder,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "label": label,
+        "file_count": file_count,
+    }
+    _backup_meta_path(server_id, backup_id).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "server_id": server_id,
+        "backup_id": backup_id,
+        "label": label,
+        "file_count": file_count,
+        "size_bytes": zpath.stat().st_size,
+    }
+
+
+def _apply_backup_retention(server_id: str, *, keep_latest: int) -> List[str]:
+    removed: List[str] = []
+    backups = _list_backups(server_id)
+    if len(backups) <= keep_latest:
+        return removed
+    for row in backups[keep_latest:]:
+        backup_id = str(row.get("backup_id") or "")
+        if not backup_id:
+            continue
+        zpath = _backup_zip_path(server_id, backup_id)
+        mpath = _backup_meta_path(server_id, backup_id)
+        try:
+            if zpath.exists():
+                zpath.unlink()
+            if mpath.exists():
+                mpath.unlink()
+            removed.append(backup_id)
+        except Exception:
+            continue
+    return removed
+
+
+def _run_due_scheduled_backup(server_id: str, now: Optional[datetime] = None) -> Dict[str, object]:
+    schedule = _load_backup_schedule(server_id)
+    if not bool(schedule.get("enabled")):
+        return {"server_id": server_id, "ran": False, "reason": "disabled", "schedule": schedule}
+
+    now_dt = now or datetime.now(timezone.utc)
+    next_raw = schedule.get("next_run_at") if isinstance(schedule.get("next_run_at"), str) else None
+    next_run_at: Optional[datetime] = None
+    if next_raw:
+        try:
+            next_run_at = datetime.fromisoformat(next_raw)
+        except Exception:
+            next_run_at = None
+    if next_run_at and next_run_at > now_dt:
+        return {"server_id": server_id, "ran": False, "reason": "not_due", "schedule": schedule}
+
+    interval_minutes = int(schedule.get("interval_minutes") or 60)
+    keep_latest = int(schedule.get("keep_latest") or 10)
+    label_prefix = str(schedule.get("label_prefix") or "Scheduled").strip() or "Scheduled"
+    label = f"{label_prefix} {now_dt.astimezone().strftime('%Y-%m-%d %H:%M')}"
+
+    try:
+        created = _create_backup(server_id, label=label)
+        removed = _apply_backup_retention(server_id, keep_latest=keep_latest)
+        schedule["last_run_at"] = now_dt.isoformat()
+        schedule["last_backup_id"] = created.get("backup_id")
+        schedule["last_error"] = None
+        schedule["next_run_at"] = _next_schedule_time(interval_minutes)
+        _save_backup_schedule(server_id, schedule)
+        return {
+            "server_id": server_id,
+            "ran": True,
+            "created": created,
+            "deleted_by_retention": removed,
+            "schedule": schedule,
+        }
+    except Exception as e:
+        schedule["last_run_at"] = now_dt.isoformat()
+        schedule["last_error"] = str(e)
+        schedule["next_run_at"] = _next_schedule_time(interval_minutes)
+        _save_backup_schedule(server_id, schedule)
+        return {
+            "server_id": server_id,
+            "ran": False,
+            "reason": "error",
+            "error": str(e),
+            "schedule": schedule,
+        }
+
+
+def _run_due_scheduled_backups_for_all() -> None:
+    """Best-effort scheduler tick for all servers; non-fatal if any server fails."""
+    try:
+        servers = read_servers_file()
+    except Exception:
+        return
+    now = datetime.now(timezone.utc)
+    for s in servers:
+        server_id = str((s or {}).get("server_id") or "")
+        if not server_id:
+            continue
+        try:
+            _run_due_scheduled_backup(server_id, now=now)
+        except Exception:
+            continue
 
 
 def _safe_extract_zip(zip_path: Path, out_dir: Path) -> None:
@@ -1397,47 +1592,93 @@ def main(argv: List[str]) -> int:
                 return 1
 
         try:
-            server = _find_server_by_id(server_id)
+            created = _create_backup(server_id, label=label)
         except Exception as e:
             error(str(e))
             return 1
 
-        folder = str(server.get("folder") or "")
-        if not folder:
-            error(f"Server {server_id} is missing folder")
+        result("backup_create", created)
+        return 0
+
+    if cmd == "backup_schedule_get":
+        if len(argv) < 3:
+            error("Usage: cli.py backup_schedule_get <server_id>")
             return 1
 
-        server_path = servers_dir() / folder
-        if not server_path.exists() or not server_path.is_dir():
-            error(f"Server folder {server_path} does not exist")
+        server_id = argv[2]
+        try:
+            _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
             return 1
 
-        backup_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        bdir = _backup_server_dir(server_id)
-        bdir.mkdir(parents=True, exist_ok=True)
-        zpath = _backup_zip_path(server_id, backup_id)
+        schedule = _load_backup_schedule(server_id)
+        result("backup_schedule_get", {"server_id": server_id, "schedule": schedule})
+        return 0
 
-        file_count = 0
-        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for path in server_path.rglob("*"):
-                if not path.is_file():
-                    continue
-                rel = path.relative_to(server_path)
-                zf.write(path, arcname=str(rel))
-                file_count += 1
+    if cmd == "backup_schedule_set":
+        if len(argv) < 3:
+            error("Usage: cli.py backup_schedule_set <server_id> [--enabled=true|false] [--interval-minutes=N] [--keep-latest=N] [--label-prefix=text]")
+            return 1
 
-        meta = {
-            "backup_id": backup_id,
-            "server_id": server_id,
-            "server_name": server.get("name"),
-            "folder": folder,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "label": label,
-            "file_count": file_count,
-        }
-        _backup_meta_path(server_id, backup_id).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        server_id = argv[2]
+        try:
+            _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
 
-        result("backup_create", {"server_id": server_id, "backup_id": backup_id, "label": label, "file_count": file_count, "size_bytes": zpath.stat().st_size})
+        schedule = _load_backup_schedule(server_id)
+        changed = False
+        for arg in argv[3:]:
+            if arg.startswith("--enabled="):
+                schedule["enabled"] = _parse_bool(arg.split("=", 1)[1])
+                changed = True
+            elif arg.startswith("--interval-minutes="):
+                schedule["interval_minutes"] = max(5, _parse_int_arg("interval_minutes", arg.split("=", 1)[1]))
+                changed = True
+            elif arg.startswith("--keep-latest="):
+                schedule["keep_latest"] = max(1, _parse_int_arg("keep_latest", arg.split("=", 1)[1]))
+                changed = True
+            elif arg.startswith("--label-prefix="):
+                schedule["label_prefix"] = arg.split("=", 1)[1].strip() or "Scheduled"
+                changed = True
+            else:
+                error(f"Unknown argument: {arg}")
+                return 1
+
+        if not changed:
+            error("No schedule settings provided")
+            return 1
+
+        interval_minutes = int(schedule.get("interval_minutes") or 60)
+        if bool(schedule.get("enabled")):
+            schedule["next_run_at"] = _next_schedule_time(interval_minutes)
+            schedule["last_error"] = None
+        else:
+            schedule["next_run_at"] = None
+
+        _save_backup_schedule(server_id, schedule)
+        result("backup_schedule_set", {"server_id": server_id, "schedule": _load_backup_schedule(server_id)})
+        return 0
+
+    if cmd == "backup_schedule_run":
+        if len(argv) < 3:
+            error("Usage: cli.py backup_schedule_run <server_id>")
+            return 1
+
+        server_id = argv[2]
+        try:
+            _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        run = _run_due_scheduled_backup(server_id)
+        if run.get("reason") == "error":
+            error(str(run.get("error") or "Scheduled backup failed"))
+            return 1
+        result("backup_schedule_run", run)
         return 0
 
     if cmd == "backup_list":
@@ -1561,6 +1802,7 @@ def main(argv: List[str]) -> int:
         return 0
 
     if cmd == "list_servers":
+        _run_due_scheduled_backups_for_all()
         servers = read_servers_file()
         result("list_servers", {"servers": _enrich_servers_for_ui(servers)})
         return 0
@@ -1568,7 +1810,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

@@ -1184,7 +1184,7 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   const [selectedItem, setSelectedItem] = useState<ModrinthHit | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [installedByType, setInstalledByType] = useState<{ primary: InstalledProject[]; datapack: InstalledProject[] }>({ primary: [], datapack: [] });
-  const [configPicker, setConfigPicker] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; candidates: Array<{ relative_path: string; reason?: string; score?: number }> } | null>(null);
+  const [configPicker, setConfigPicker] = useState<{ projectType: "plugin" | "mod" | "datapack"; projectId: string; projectTitle: string; baseRelative?: string; manual?: boolean; candidates: Array<{ relative_path: string; reason?: string; score?: number }> } | null>(null);
   const [editorState, setEditorState] = useState<{ projectTitle: string; relativePath: string; content: string; dirty: boolean; saving: boolean } | null>(null);
 
   const activeProjectType: "plugin" | "mod" | "datapack" = tab === "datapack" ? "datapack" : primaryType;
@@ -1335,7 +1335,22 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       const res = await cli<any>("modrinth_config_candidates", server.folder, projectType, projectId);
       const cands = Array.isArray(res?.data?.candidates) ? res.data.candidates : [];
       if (cands.length === 0) {
-        addLog("warn", `No config files detected for ${projectTitle}.`);
+        addLog("warn", `Could not auto-detect config for ${projectTitle}. Please choose a file manually.`);
+        const browse = await cli<any>("modrinth_browse_config_files", server.folder, projectType);
+        const files = Array.isArray(browse?.data?.files) ? browse.data.files : [];
+        const baseRelative = typeof browse?.data?.base_relative === "string" ? browse.data.base_relative : undefined;
+        if (files.length === 0) {
+          addLog("warn", `No editable config files found under ${baseRelative ?? "the expected config directory"}.`);
+          return;
+        }
+        setConfigPicker({
+          projectType,
+          projectId,
+          projectTitle,
+          baseRelative,
+          manual: true,
+          candidates: files.map((c: any) => ({ relative_path: String(c.relative_path) })),
+        });
         return;
       }
       if (cands.length === 1) {
@@ -1473,10 +1488,11 @@ function ContentPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
         <div style={styles.contentOverlay} onClick={() => setConfigPicker(null)}>
           <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.contentModalHead}>
-              <div style={{ fontWeight: 900 }}>Choose config file — {configPicker.projectTitle}</div>
+              <div style={{ fontWeight: 900 }}>{configPicker.manual ? `Config file picker — ${configPicker.projectTitle}` : `Choose config file — ${configPicker.projectTitle}`}</div>
               <button type="button" style={btn("ghost")} onClick={() => setConfigPicker(null)}>Close</button>
             </div>
             <div style={styles.contentModalBody}>
+              {configPicker.manual && <div style={styles.contentItemMeta}>Could not auto-detect config. Select a file from {configPicker.baseRelative ?? "the expected directory"}.</div>}
               {configPicker.candidates.map((c) => (
                 <button key={c.relative_path} type="button" style={{ ...styles.contentItem, cursor: "pointer" }} onClick={() => void openConfigFile(configPicker.projectTitle, c.relative_path)}>
                   <div style={{ minWidth: 0, flex: 1 }}>

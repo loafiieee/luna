@@ -322,7 +322,7 @@ async function copyAddress() {
           {tab === "console" && <ConsolePane server={server} addLog={addLog} isOnline={isOnline} actionBusy={actionBusy} />}
           {tab === "content" && <ContentPane server={server} addLog={addLog} />}
           {tab === "backups" && <BackupsPane server={server} addLog={addLog} />}
-          {tab === "tunnels" && <TunnelsPane server={server} />}
+          {tab === "tunnels" && <TunnelsPane server={server} addLog={addLog} onLiveRefresh={onLiveRefresh} />}
           {tab === "settings" && <PlaceholderPane title="Settings" desc="server.properties editor + RAM/port, etc." />}
           {tab === "server_folder" && <PlaceholderPane title="Server Folder" desc="Open folder, open logs, etc." />}
         </div>
@@ -1047,9 +1047,18 @@ function formatUptime(sec: number | null) {
   return `${s}s`;
 }
 
-function TunnelsPane({ server }: { server: ServerInfo }) {
+function TunnelsPane({ server, addLog, onLiveRefresh }: { server: ServerInfo; addLog: ServerModalProps["addLog"]; onLiveRefresh: ServerModalProps["onLiveRefresh"] }) {
   const rt: any = server.runtime ?? {};
   const t: any = rt.tunnel ?? {};
+  const [tunnelingEnabled, setTunnelingEnabled] = useState(Boolean(server.tunneling));
+  const [stickyEnabled, setStickyEnabled] = useState(Boolean(server.sticky_address));
+  const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    setTunnelingEnabled(Boolean(server.tunneling));
+    setStickyEnabled(Boolean(server.sticky_address));
+  }, [server.server_id, server.tunneling, server.sticky_address]);
 
   const tcp = typeof t.public_tcp_address === "string" ? t.public_tcp_address : null;
   const udp = typeof t.public_udp_address === "string" ? t.public_udp_address : null;
@@ -1060,11 +1069,63 @@ function TunnelsPane({ server }: { server: ServerInfo }) {
 
   const primary = (server.edition === "bedrock" ? udp ?? tcp : tcp ?? udp) ?? "(none)";
 
+  async function saveTunnelConfig() {
+    try {
+      setSaving(true);
+      await cli(
+        "set_tunnel_config",
+        server.server_id,
+        `--tunneling=${tunnelingEnabled ? "true" : "false"}`,
+        `--sticky-address=${stickyEnabled ? "true" : "false"}`,
+      );
+      addLog("ok", `Tunnel settings saved for ${server.name}.`);
+      if (server.running) {
+        addLog("warn", "Server is running; settings will be fully applied on next start.");
+      }
+      onLiveRefresh();
+    } catch (e: any) {
+      addLog("err", `Failed to save tunnel settings: ${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function syncTunnelsNow() {
+    try {
+      setSyncing(true);
+      await cli("sync_tunnels");
+      addLog("ok", "Tunnel reservations synced.");
+      onLiveRefresh();
+    } catch (e: any) {
+      addLog("err", `Failed to sync tunnel reservations: ${String(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
     <div>
       <div style={styles.paneTitle}>Tunnels</div>
       <div style={{ opacity: 0.75, marginTop: 6 }}>
-        Public endpoints from runtime. (Java uses TCP; Bedrock uses UDP.)
+        Public endpoints from runtime plus editable tunnel controls.
+      </div>
+
+      <div style={{ ...styles.contentItem, marginTop: 12, marginBottom: 10 }}>
+        <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 8 }}>
+          <div style={styles.contentItemTitle}>Controls</div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" checked={tunnelingEnabled} onChange={(e) => setTunnelingEnabled(e.target.checked)} />
+            <span>Enable tunneling</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" checked={stickyEnabled} onChange={(e) => setStickyEnabled(e.target.checked)} />
+            <span>Prefer sticky public address</span>
+          </label>
+        </div>
+        <div style={{ display: "grid", gap: 6 }}>
+          <button type="button" style={btn("primary")} disabled={saving} onClick={() => void saveTunnelConfig()}>{saving ? "Saving…" : "Save Tunnel Settings"}</button>
+          <button type="button" style={btn("ghost")} disabled={syncing} onClick={() => void syncTunnelsNow()}>{syncing ? "Syncing…" : "Sync Reservations"}</button>
+        </div>
       </div>
 
       <div style={styles.kvGrid}>

@@ -742,6 +742,30 @@ def _rename_server(server_id: str, new_name: str) -> dict:
     return found
 
 
+
+
+def _update_tunnel_config(server_id: str, *, tunneling: Optional[bool] = None, sticky_address: Optional[bool] = None) -> dict:
+    found: dict | None = None
+
+    def _mut(servers: list[dict]) -> list[dict]:
+        nonlocal found
+        for srv in servers:
+            if str(srv.get("server_id") or "") != str(server_id):
+                continue
+            if tunneling is not None:
+                srv["tunneling"] = bool(tunneling)
+            if sticky_address is not None:
+                srv["sticky_address"] = bool(sticky_address)
+            found = dict(srv)
+            break
+        return servers
+
+    STATE.mutate(_mut)
+    if not found:
+        raise ValueError(f"Server {server_id} not found")
+    return found
+
+
 def _find_server_by_id(server_id: str) -> dict:
     sid = str(server_id)
     for server in STATE.read():
@@ -1787,6 +1811,44 @@ def main(argv: List[str]) -> int:
         result("backup_restore", {"server_id": server_id, "backup_id": backup_id, "restored": True, "auto_stopped": auto_stopped})
         return 0
 
+
+    if cmd == "set_tunnel_config":
+        if len(argv) < 3:
+            error("Usage: cli.py set_tunnel_config <server_id> [--tunneling=true|false] [--sticky-address=true|false]")
+            return 1
+
+        server_id = argv[2]
+        tunneling: Optional[bool] = None
+        sticky_address: Optional[bool] = None
+
+        for arg in argv[3:]:
+            if arg.startswith("--tunneling="):
+                tunneling = _parse_bool(arg.split("=", 1)[1])
+            elif arg.startswith("--sticky-address="):
+                sticky_address = _parse_bool(arg.split("=", 1)[1])
+            else:
+                error(f"Unknown argument: {arg}")
+                return 1
+
+        if tunneling is None and sticky_address is None:
+            error("No tunnel settings provided")
+            return 1
+
+        try:
+            updated = _update_tunnel_config(server_id, tunneling=tunneling, sticky_address=sticky_address)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        _maybe_sync()
+        result("set_tunnel_config", {"server": updated})
+        return 0
+
+    if cmd == "sync_tunnels":
+        _maybe_sync()
+        result("sync_tunnels", {"synced": True})
+        return 0
+
     if cmd == "rename_server":
         if len(argv) < 4:
             error("Usage: cli.py rename_server <server_id> <new_name>")
@@ -1810,7 +1872,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, set_tunnel_config, sync_tunnels, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

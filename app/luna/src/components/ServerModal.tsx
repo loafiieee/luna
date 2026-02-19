@@ -1,6 +1,7 @@
 import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -323,8 +324,8 @@ async function copyAddress() {
           {tab === "content" && <ContentPane server={server} addLog={addLog} />}
           {tab === "backups" && <BackupsPane server={server} addLog={addLog} />}
           {tab === "tunnels" && <TunnelsPane server={server} addLog={addLog} onLiveRefresh={onLiveRefresh} />}
-          {tab === "settings" && <PlaceholderPane title="Settings" desc="server.properties editor + RAM/port, etc." />}
-          {tab === "server_folder" && <PlaceholderPane title="Server Folder" desc="Open folder, open logs, etc." />}
+          {tab === "settings" && <SettingsPane server={server} addLog={addLog} />}
+          {tab === "server_folder" && <ServerFolderPane server={server} addLog={addLog} />}
         </div>
 
         <div style={styles.rightPane}>
@@ -1894,21 +1895,141 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
   );
 }
 
-function PlaceholderPane({ title, desc }: { title: string; desc: string }) {
+
+type ServerPropertyRow = {
+  key: string;
+  value: string;
+};
+
+function parseServerProperties(content: string): ServerPropertyRow[] {
+  const rows: ServerPropertyRow[] = [];
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+    const idx = line.indexOf("=");
+    if (idx < 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1);
+    if (!key) continue;
+    rows.push({ key, value });
+  }
+  rows.sort((a, b) => a.key.localeCompare(b.key));
+  return rows;
+}
+
+function serializeServerProperties(rows: ServerPropertyRow[]): string {
+  return rows.map((r) => `${r.key}=${r.value}`).join("\n") + "\n";
+}
+
+function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<ServerPropertyRow[]>([]);
+
+  async function loadProperties() {
+    try {
+      setLoading(true);
+      const res = await cli<any>("read_server_text_file", server.folder, "server.properties");
+      const content = typeof res?.data?.content === "string" ? res.data.content : "";
+      setRows(parseServerProperties(content));
+    } catch (e: any) {
+      addLog("err", `Failed to load server.properties: ${String(e)}`);
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadProperties();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.server_id]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((r) => r.key.toLowerCase().includes(q) || r.value.toLowerCase().includes(q));
+  }, [rows, query]);
+
+  async function saveProperties() {
+    try {
+      setSaving(true);
+      const content = serializeServerProperties(rows);
+      const encoded = btoa(unescape(encodeURIComponent(content)));
+      await cli("write_server_text_file", server.folder, "server.properties", encoded);
+      addLog("ok", `Saved server.properties for ${server.name}.`);
+      await loadProperties();
+    } catch (e: any) {
+      addLog("err", `Failed to save server.properties: ${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function setValueByKey(key: string, nextValue: string) {
+    setRows((curr) => curr.map((row) => (row.key === key ? { ...row, value: nextValue } : row)));
+  }
+
   return (
     <div>
-      <div style={styles.paneTitle}>{title}</div>
-      <div style={{ opacity: 0.75, marginTop: 6, lineHeight: 1.5 }}>{desc}</div>
-      <div
-        style={{
-          marginTop: 14,
-          padding: 14,
-          borderRadius: 16,
-          border: "1px dashed rgba(255,255,255,.14)",
-          opacity: 0.8,
-        }}
-      >
-        UI scaffold is ready — we’ll hook this to real commands next.
+      <div style={styles.paneTitle}>Settings</div>
+      <div style={styles.contentMeta}>Edit <code>server.properties</code> in a structured form.</div>
+
+      <div style={styles.contentSearchRow}>
+        <input style={styles.search} placeholder="Filter properties…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <button type="button" style={btn("ghost")} onClick={() => void loadProperties()} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button>
+        <button type="button" style={btn("primary")} onClick={() => void saveProperties()} disabled={saving || loading}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+
+      <div style={styles.contentResults}>
+        {filtered.length === 0 ? (
+          <div style={styles.playersEmpty}>{loading ? "Loading properties…" : "No properties match your filter."}</div>
+        ) : (
+          filtered.map((row) => (
+            <div key={row.key} style={styles.contentItem}>
+              <div style={{ minWidth: 180, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontWeight: 700 }}>{row.key}</div>
+              <input
+                style={{ ...styles.search, flex: 1 }}
+                value={row.value}
+                onChange={(e) => setValueByKey(row.key, e.target.value)}
+              />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ServerFolderPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const [opening, setOpening] = useState(false);
+
+  async function openServerFolder() {
+    const target = server.server_dir || `servers/${server.folder}`;
+    try {
+      setOpening(true);
+      await openPath(target);
+      addLog("ok", `Opened server folder for ${server.name}.`);
+    } catch (e: any) {
+      addLog("err", `Failed to open server folder: ${String(e)}`);
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Server Folder</div>
+      <div style={styles.contentMeta}>Open this server in your operating system file manager.</div>
+      <div style={{ ...styles.contentItem, marginTop: 12 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={styles.contentItemTitle}>{server.server_dir || `servers/${server.folder}`}</div>
+          <div style={styles.contentItemMeta}>Folder for {server.name}</div>
+        </div>
+        <button type="button" style={btn("primary")} onClick={() => void openServerFolder()} disabled={opening}>
+          {opening ? "Opening…" : "Open Folder"}
+        </button>
       </div>
     </div>
   );

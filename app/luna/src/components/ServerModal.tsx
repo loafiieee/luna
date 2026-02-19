@@ -1,6 +1,7 @@
 import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -2041,18 +2042,552 @@ function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMo
 function PlaceholderPane({ title, desc }: { title: string; desc: string }) {
   return (
     <div>
-      <div style={styles.paneTitle}>{title}</div>
-      <div style={{ opacity: 0.75, marginTop: 6, lineHeight: 1.5 }}>{desc}</div>
-      <div
-        style={{
-          marginTop: 14,
-          padding: 14,
-          borderRadius: 16,
-          border: "1px dashed rgba(255,255,255,.14)",
-          opacity: 0.8,
-        }}
-      >
-        UI scaffold is ready — we’ll hook this to real commands next.
+      <div style={styles.paneTitle}>Content</div>
+      <div style={styles.contentTabRow}>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "primary" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("primary")}>{primaryLabel}</button>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "datapack" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("datapack")}>Datapacks</button>
+        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "installed" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("installed")}>Installed</button>
+      </div>
+
+      <div style={styles.contentMeta}>{tab === "installed" ? "Manage installed content and configs." : `Showing ${activeProjectType}s relevant to this server${loader ? ` • loader: ${loader}` : ""}${gameVersion ? ` • MC ${gameVersion}` : ""}`}</div>
+
+      {tab !== "installed" && (
+        <>
+          <div style={styles.contentSearchRow}>
+            <input style={styles.search} placeholder={`Search ${activeProjectType}s on Modrinth…`} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void runSearch(query); } }} />
+            <button type="button" style={btn("primary")} onClick={() => void runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+          </div>
+          <div style={styles.contentSearchRow}>
+            <select style={styles.contentSelect} value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
+              {categoryOptions.map((cat) => <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>)}
+            </select>
+          </div>
+          {err && <div style={styles.consoleError}>Search error: {err}</div>}
+          <div style={styles.contentResults}>
+            {shownItems.length === 0 ? <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div> : shownItems.map((item) => {
+              const id = String(item.project_id ?? "");
+              const title = item.title || id;
+              const installing = installingId === id;
+              const isInstalled = installedIds.has(id);
+              const icon = typeof item.icon_url === "string" ? item.icon_url : null;
+              return (
+                <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
+                  <div style={styles.contentItem}>
+                    <div style={styles.contentThumbWrap}>{icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}</div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={styles.contentItemTitle}>{title}</div>
+                      <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
+                      <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
+                    </div>
+                    <button type="button" style={btn(isInstalled ? "ghost" : "primary")} onClick={(e) => { e.stopPropagation(); if (!isInstalled) void installProject(id); }} disabled={installing || !id || isInstalled}>{isInstalled ? "Installed" : installing ? "Installing…" : "Install"}</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {tab === "installed" && (
+        <div style={styles.contentResults}>
+          {renderInstalledSection(primaryLabel, primaryType, installedByType.primary)}
+          {renderInstalledSection("Datapacks", "datapack", installedByType.datapack)}
+        </div>
+      )}
+
+      {selectedItem && tab !== "installed" && (
+        <div style={styles.contentOverlay} onClick={() => setSelectedItem(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>{selectedItem.title ?? selectedItem.project_id}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setSelectedItem(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              {selectedItem.icon_url ? <img src={selectedItem.icon_url} alt="project" style={styles.contentModalImage} /> : null}
+              <div style={styles.contentItemDesc}>{selectedItem.description ?? "No description."}</div>
+              <div style={styles.contentItemMeta}>Author: {selectedItem.author ?? "unknown"}</div>
+              <div style={styles.contentItemMeta}>Downloads: {Number(selectedItem.downloads ?? 0).toLocaleString()}</div>
+              <div style={styles.contentItemMeta}>Categories: {normalizeCategories(selectedItem).join(", ") || "—"}</div>
+              <div style={styles.contentItemMeta}>Versions: {Array.isArray(selectedItem.versions) ? selectedItem.versions.join(", ") : "—"}</div>
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn(installedIds.has(String(selectedItem.project_id ?? "")) ? "ghost" : "primary")} onClick={() => { const pid = String(selectedItem.project_id ?? ""); if (!installedIds.has(pid)) void installProject(pid); }} disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id || installedIds.has(String(selectedItem.project_id ?? ""))}>{installedIds.has(String(selectedItem.project_id ?? "")) ? "Installed" : installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {configPicker && (
+        <div style={styles.contentOverlay} onClick={() => setConfigPicker(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>{configPicker.manual ? `Config file picker — ${configPicker.projectTitle}` : `Choose config file — ${configPicker.projectTitle}`}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setConfigPicker(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              {configPicker.manual && <div style={styles.contentItemMeta}>Could not auto-detect config. Select a file from {configPicker.baseRelative ?? "the expected directory"}.</div>}
+              {configPicker.candidates.map((c) => (
+                <button key={c.relative_path} type="button" style={styles.contentPickerBtn} onClick={() => void openConfigFile(configPicker.projectType, configPicker.projectId, configPicker.projectTitle, c.relative_path, Boolean(configPicker.manual))}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={styles.contentItemTitle}>{c.relative_path}</div>
+                    <div style={styles.contentItemMeta}>{c.reason ?? "match"}{typeof c.score === "number" ? ` • score ${c.score}` : ""}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editorState && (
+        <div style={styles.contentOverlay} onClick={() => { void closeEditor(); }}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>Edit config — {editorState.projectTitle}</div>
+              <button type="button" style={btn("ghost")} onClick={() => { void closeEditor(); }} disabled={editorState.dirty || editorState.saving}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              <div style={styles.contentItemMeta}>{editorState.relativePath}</div>
+              {editorState.justSaved && <div style={styles.contentSaveOk}>Saved.</div>}
+              <textarea
+                style={styles.configEditorArea}
+                value={editorState.content}
+                onChange={(e) => setEditorState((prev) => (prev ? { ...prev, content: e.target.value, dirty: true, justSaved: false } : prev))}
+              />
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn("primary")} disabled={!editorState.dirty || editorState.saving} onClick={() => void saveEditor()}>{editorState.saving ? "Saving…" : "Save"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {preferredPrompt && (
+        <div style={styles.contentOverlay} onClick={() => setPreferredPrompt(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>Use this config file by default?</div>
+              <button type="button" style={btn("ghost")} onClick={() => setPreferredPrompt(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              <div style={styles.contentItemDesc}>Always use this config file for <strong>{preferredPrompt.projectTitle}</strong>?</div>
+              <div style={styles.contentItemMeta}>{preferredPrompt.relativePath}</div>
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn("ghost")} onClick={() => setPreferredPrompt(null)}>Not now</button>
+              <button
+                type="button"
+                style={btn("primary")}
+                onClick={() => {
+                  const p = preferredPrompt;
+                  setPreferredPrompt(null);
+                  if (p) void setPreferredConfig(p.projectType, p.projectId, p.projectTitle, p.relativePath);
+                }}
+              >
+                Always use this file
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+
+function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const [items, setItems] = useState<Array<{ backup_id: string; created_at?: string | null; label?: string | null; size_bytes?: number; file_count?: number }>>([]);
+  const [schedule, setSchedule] = useState<{ enabled: boolean; interval_minutes: number; keep_latest: number; label_prefix: string; next_run_at?: string | null; last_run_at?: string | null; last_error?: string | null } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [runningScheduleNow, setRunningScheduleNow] = useState(false);
+  const [label, setLabel] = useState("");
+  const [confirmAction, setConfirmAction] = useState<{ type: "restore" | "delete"; backupId: string; backupLabel: string } | null>(null);
+
+  async function refreshBackups() {
+    try {
+      setLoading(true);
+      const [res, scheduleRes] = await Promise.all([
+        cli<any>("backup_list", server.server_id),
+        cli<any>("backup_schedule_get", server.server_id),
+      ]);
+      const rows = Array.isArray(res?.data?.backups) ? res.data.backups : [];
+      setItems(rows);
+      setSchedule(scheduleRes?.data?.schedule ?? null);
+    } catch (e: any) {
+      addLog("err", `Failed to load backups: ${String(e)}`);
+      setItems([]);
+      setSchedule(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshBackups();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.server_id]);
+
+  async function createBackup() {
+    try {
+      setCreating(true);
+      const args = ["backup_create", server.server_id];
+      if (label.trim()) args.push(`--label=${label.trim()}`);
+      await cli<any>(...args);
+      setLabel("");
+      addLog("ok", `Backup created for ${server.name}.`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Backup creation failed: ${String(e)}`);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function restoreBackup(backupId: string) {
+    try {
+      setBusyId(`restore:${backupId}`);
+      const res = await cli<any>("backup_restore", server.server_id, backupId);
+      if (Boolean(res?.data?.auto_stopped)) {
+        addLog("warn", `Server was running and was stopped automatically before restore.`);
+      }
+      addLog("ok", `Backup ${backupId} restored.`);
+    } catch (e: any) {
+      addLog("err", `Restore failed for ${backupId}: ${String(e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteBackup(backupId: string) {
+    try {
+      setBusyId(`delete:${backupId}`);
+      await cli("backup_delete", server.server_id, backupId);
+      addLog("ok", `Backup ${backupId} deleted.`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Delete failed for ${backupId}: ${String(e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function saveSchedule() {
+    if (!schedule) return;
+    try {
+      setSavingSchedule(true);
+      await cli(
+        "backup_schedule_set",
+        server.server_id,
+        `--enabled=${schedule.enabled ? "true" : "false"}`,
+        `--interval-minutes=${Math.max(5, Number(schedule.interval_minutes) || 60)}`,
+        `--keep-latest=${Math.max(1, Number(schedule.keep_latest) || 10)}`,
+        `--label-prefix=${(schedule.label_prefix || "Scheduled").trim() || "Scheduled"}`,
+      );
+      addLog("ok", `Scheduled backups updated for ${server.name}.`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Failed to save backup schedule: ${String(e)}`);
+    } finally {
+      setSavingSchedule(false);
+    }
+  }
+
+  async function runScheduledNow() {
+    try {
+      setRunningScheduleNow(true);
+      const res = await cli<any>("backup_schedule_run", server.server_id);
+      if (res?.data?.ran) addLog("ok", "Scheduled backup created now.");
+      else addLog("info", `Scheduled backup did not run (${String(res?.data?.reason || "not due")}).`);
+      await refreshBackups();
+    } catch (e: any) {
+      addLog("err", `Failed to run scheduled backup: ${String(e)}`);
+    } finally {
+      setRunningScheduleNow(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Backups</div>
+      <div style={styles.contentMeta}>Create, restore, and delete snapshots for this server. Restore will automatically stop a running server first.</div>
+
+      <div style={styles.contentSearchRow}>
+        <input style={styles.search} placeholder="Optional backup label…" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <button type="button" style={btn("primary")} disabled={creating} onClick={() => void createBackup()}>{creating ? "Creating…" : "Create Backup"}</button>
+        <button type="button" style={btn("ghost")} disabled={loading} onClick={() => void refreshBackups()}>{loading ? "Refreshing…" : "Refresh"}</button>
+      </div>
+
+      <div style={{ ...styles.contentItem, marginBottom: 10, alignItems: "end" }}>
+        <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 8 }}>
+          <div style={styles.contentItemTitle}>Scheduled backups</div>
+          <div style={styles.contentItemMeta}>Enable automatic backups with retention cleanup.</div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={Boolean(schedule?.enabled)}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { interval_minutes: 60, keep_latest: 10, label_prefix: "Scheduled" }), enabled: e.target.checked } as any))}
+            />
+            <span>Enabled</span>
+          </label>
+          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))" }}>
+            <input
+              style={styles.search}
+              type="number"
+              min={5}
+              value={schedule?.interval_minutes ?? 60}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, keep_latest: 10, label_prefix: "Scheduled" }), interval_minutes: Number(e.target.value) || 60 } as any))}
+              placeholder="Interval (minutes)"
+            />
+            <input
+              style={styles.search}
+              type="number"
+              min={1}
+              value={schedule?.keep_latest ?? 10}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, interval_minutes: 60, label_prefix: "Scheduled" }), keep_latest: Number(e.target.value) || 10 } as any))}
+              placeholder="Keep latest"
+            />
+            <input
+              style={styles.search}
+              value={schedule?.label_prefix ?? "Scheduled"}
+              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, interval_minutes: 60, keep_latest: 10 }), label_prefix: e.target.value } as any))}
+              placeholder="Label prefix"
+            />
+          </div>
+          {schedule?.next_run_at && <div style={styles.contentItemMeta}>Next run: {new Date(schedule.next_run_at).toLocaleString()}</div>}
+          {schedule?.last_run_at && <div style={styles.contentItemMeta}>Last run: {new Date(schedule.last_run_at).toLocaleString()}</div>}
+          {schedule?.last_error && <div style={{ ...styles.contentItemMeta, color: "#ff9a9a" }}>Last error: {schedule.last_error}</div>}
+        </div>
+        <div style={{ display: "grid", gap: 6 }}>
+          <button type="button" style={btn("primary")} disabled={savingSchedule || !schedule} onClick={() => void saveSchedule()}>{savingSchedule ? "Saving…" : "Save Schedule"}</button>
+          <button type="button" style={btn("ghost")} disabled={runningScheduleNow} onClick={() => void runScheduledNow()}>{runningScheduleNow ? "Running…" : "Run Due Now"}</button>
+        </div>
+      </div>
+
+      <div style={styles.contentResults}>
+        {items.length === 0 ? (
+          <div style={styles.playersEmpty}>{loading ? "Loading backups…" : "No backups yet."}</div>
+        ) : (
+          items.map((b) => {
+            const restoreBusy = busyId === `restore:${b.backup_id}`;
+            const deleteBusy = busyId === `delete:${b.backup_id}`;
+            const created = b.created_at ? new Date(b.created_at).toLocaleString() : b.backup_id;
+            const sizeMb = typeof b.size_bytes === "number" ? `${(b.size_bytes / (1024 * 1024)).toFixed(2)} MB` : "—";
+            const displayLabel = b.label?.trim() || b.backup_id;
+            return (
+              <div key={b.backup_id} style={styles.contentItem}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={styles.contentItemTitle}>{displayLabel}</div>
+                  <div style={styles.contentItemMeta}>{created} • {sizeMb} • {typeof b.file_count === "number" ? `${b.file_count} files` : "file count unknown"}</div>
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <button type="button" style={btn("ghost")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "restore", backupId: b.backup_id, backupLabel: displayLabel })}>{restoreBusy ? "Restoring…" : "Restore"}</button>
+                  <button type="button" style={btn("danger")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "delete", backupId: b.backup_id, backupLabel: displayLabel })}>{deleteBusy ? "Deleting…" : "Delete"}</button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {confirmAction && (
+        <div style={styles.contentOverlay} onClick={() => setConfirmAction(null)}>
+          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.contentModalHead}>
+              <div style={{ fontWeight: 900 }}>{confirmAction.type === "restore" ? "Restore backup?" : "Delete backup?"}</div>
+              <button type="button" style={btn("ghost")} onClick={() => setConfirmAction(null)}>Close</button>
+            </div>
+            <div style={styles.contentModalBody}>
+              <div style={styles.contentItemDesc}>{confirmAction.backupLabel}</div>
+              <div style={styles.contentItemMeta}>
+                {confirmAction.type === "restore"
+                  ? "Current server files will be replaced. If running, the server will be stopped automatically before restore."
+                  : "This backup archive and metadata will be removed permanently."}
+              </div>
+            </div>
+            <div style={styles.contentModalActions}>
+              <button type="button" style={btn("ghost")} onClick={() => setConfirmAction(null)}>Cancel</button>
+              <button
+                type="button"
+                style={btn(confirmAction.type === "restore" ? "primary" : "danger")}
+                onClick={() => {
+                  const action = confirmAction;
+                  setConfirmAction(null);
+                  if (!action) return;
+                  if (action.type === "restore") void restoreBackup(action.backupId);
+                  else void deleteBackup(action.backupId);
+                }}
+              >
+                {confirmAction.type === "restore" ? "Restore" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+type ServerPropertyRow = {
+  key: string;
+  value: string;
+};
+
+
+const PROTECTED_SERVER_PROPERTIES = new Set([
+  "server-port",
+  "server-ip",
+  "query.port",
+  "enable-query",
+  "rcon.port",
+  "enable-rcon",
+]);
+
+function isProtectedServerProperty(key: string): boolean {
+  return PROTECTED_SERVER_PROPERTIES.has(key.trim().toLowerCase());
+}
+
+function parseServerProperties(content: string): ServerPropertyRow[] {
+  const rows: ServerPropertyRow[] = [];
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+    const idx = line.indexOf("=");
+    if (idx < 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1);
+    if (!key) continue;
+    rows.push({ key, value });
+  }
+  rows.sort((a, b) => a.key.localeCompare(b.key));
+  return rows;
+}
+
+function serializeServerProperties(rows: ServerPropertyRow[]): string {
+  return rows.map((r) => `${r.key}=${r.value}`).join("\n") + "\n";
+}
+
+function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<ServerPropertyRow[]>([]);
+
+  async function loadProperties() {
+    try {
+      setLoading(true);
+      const res = await cli<any>("read_server_text_file", server.folder, "server.properties");
+      const content = typeof res?.data?.content === "string" ? res.data.content : "";
+      setRows(parseServerProperties(content));
+    } catch (e: any) {
+      addLog("err", `Failed to load server.properties: ${String(e)}`);
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadProperties();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.server_id]);
+
+  const visibleRows = useMemo(() => rows.filter((r) => !isProtectedServerProperty(r.key)), [rows]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return visibleRows;
+    return visibleRows.filter((r) => r.key.toLowerCase().includes(q) || r.value.toLowerCase().includes(q));
+  }, [visibleRows, query]);
+
+  const protectedCount = rows.length - visibleRows.length;
+
+  async function saveProperties() {
+    try {
+      setSaving(true);
+      const content = serializeServerProperties(rows);
+      const encoded = btoa(unescape(encodeURIComponent(content)));
+      await cli("write_server_text_file", server.folder, "server.properties", encoded);
+      addLog("ok", `Saved server.properties for ${server.name}.`);
+      await loadProperties();
+    } catch (e: any) {
+      addLog("err", `Failed to save server.properties: ${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function setValueByKey(key: string, nextValue: string) {
+    setRows((curr) => curr.map((row) => (row.key === key ? { ...row, value: nextValue } : row)));
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Settings</div>
+      <div style={styles.contentMeta}>Edit <code>server.properties</code> in a structured form.</div>
+      {protectedCount > 0 && (
+        <div style={{ ...styles.contentItemMeta, marginTop: 8 }}>
+          {protectedCount} protected network/tunnel property{protectedCount === 1 ? "" : "ies"} hidden to avoid breaking tunneling (for example: <code>server-port</code>, <code>server-ip</code>, <code>query.port</code>, <code>rcon.port</code>).
+        </div>
+      )}
+
+      <div style={styles.contentSearchRow}>
+        <input style={styles.search} placeholder="Filter properties…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <button type="button" style={btn("ghost")} onClick={() => void loadProperties()} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button>
+        <button type="button" style={btn("primary")} onClick={() => void saveProperties()} disabled={saving || loading}>{saving ? "Saving…" : "Save"}</button>
+      </div>
+
+      <div style={styles.contentResults}>
+        {filtered.length === 0 ? (
+          <div style={styles.playersEmpty}>{loading ? "Loading properties…" : "No properties match your filter."}</div>
+        ) : (
+          filtered.map((row) => (
+            <div key={row.key} style={styles.contentItem}>
+              <div style={{ minWidth: 180, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontWeight: 700 }}>{row.key}</div>
+              <input
+                style={{ ...styles.search, flex: 1 }}
+                value={row.value}
+                onChange={(e) => setValueByKey(row.key, e.target.value)}
+              />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ServerFolderPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
+  const [opening, setOpening] = useState(false);
+
+  async function openServerFolder() {
+    const target = server.server_dir || `servers/${server.folder}`;
+    try {
+      setOpening(true);
+      await openPath(target);
+      addLog("ok", `Opened server folder for ${server.name}.`);
+    } catch (e: any) {
+      addLog("err", `Failed to open server folder: ${String(e)}`);
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={styles.paneTitle}>Server Folder</div>
+      <div style={styles.contentMeta}>Open this server in your operating system file manager.</div>
+      <div style={{ ...styles.contentItem, marginTop: 12 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={styles.contentItemTitle}>{server.server_dir || `servers/${server.folder}`}</div>
+          <div style={styles.contentItemMeta}>Folder for {server.name}</div>
+        </div>
+        <button type="button" style={btn("primary")} onClick={() => void openServerFolder()} disabled={opening}>
+          {opening ? "Opening…" : "Open Folder"}
+        </button>
       </div>
     </div>
   );

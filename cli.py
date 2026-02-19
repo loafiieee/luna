@@ -766,6 +766,19 @@ def _update_tunnel_config(server_id: str, *, tunneling: Optional[bool] = None, s
     return found
 
 
+
+
+def _open_in_file_manager(path: Path) -> None:
+    target = str(path.resolve())
+    if sys.platform.startswith("win"):
+        os.startfile(target)  # type: ignore[attr-defined]
+        return
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+        return
+    subprocess.Popen(["xdg-open", target])
+
+
 def _find_server_by_id(server_id: str) -> dict:
     sid = str(server_id)
     for server in STATE.read():
@@ -1849,6 +1862,38 @@ def main(argv: List[str]) -> int:
         result("sync_tunnels", {"synced": True})
         return 0
 
+
+    if cmd == "open_server_folder":
+        if len(argv) < 3:
+            error("Usage: cli.py open_server_folder <server_id>")
+            return 1
+
+        server_id = argv[2]
+        try:
+            server = _find_server_by_id(server_id)
+        except Exception as e:
+            error(str(e))
+            return 1
+
+        folder = str(server.get("folder") or "")
+        if not folder:
+            error(f"Server {server_id} is missing folder")
+            return 1
+
+        server_path = servers_dir() / folder
+        if not server_path.exists() or not server_path.is_dir():
+            error(f"Server folder {server_path} does not exist")
+            return 1
+
+        try:
+            _open_in_file_manager(server_path)
+        except Exception as e:
+            error(f"Failed to open server folder: {e}")
+            return 1
+
+        result("open_server_folder", {"server_id": server_id, "path": str(server_path), "opened": True})
+        return 0
+
     if cmd == "rename_server":
         if len(argv) < 4:
             error("Usage: cli.py rename_server <server_id> <new_name>")
@@ -1872,7 +1917,7 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, set_tunnel_config, sync_tunnels, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, set_tunnel_config, sync_tunnels, open_server_folder, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
         )
         info("Add --json to output machine-readable JSON events")
         return 0

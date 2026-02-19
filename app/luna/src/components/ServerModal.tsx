@@ -1901,6 +1901,20 @@ type ServerPropertyRow = {
   value: string;
 };
 
+
+const PROTECTED_SERVER_PROPERTIES = new Set([
+  "server-port",
+  "server-ip",
+  "query.port",
+  "enable-query",
+  "rcon.port",
+  "enable-rcon",
+]);
+
+function isProtectedServerProperty(key: string): boolean {
+  return PROTECTED_SERVER_PROPERTIES.has(key.trim().toLowerCase());
+}
+
 function parseServerProperties(content: string): ServerPropertyRow[] {
   const rows: ServerPropertyRow[] = [];
   for (const rawLine of content.split(/\r?\n/)) {
@@ -1946,11 +1960,15 @@ function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [server.server_id]);
 
+  const visibleRows = useMemo(() => rows.filter((r) => !isProtectedServerProperty(r.key)), [rows]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((r) => r.key.toLowerCase().includes(q) || r.value.toLowerCase().includes(q));
-  }, [rows, query]);
+    if (!q) return visibleRows;
+    return visibleRows.filter((r) => r.key.toLowerCase().includes(q) || r.value.toLowerCase().includes(q));
+  }, [visibleRows, query]);
+
+  const protectedCount = rows.length - visibleRows.length;
 
   async function saveProperties() {
     try {
@@ -1975,6 +1993,11 @@ function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMo
     <div>
       <div style={styles.paneTitle}>Settings</div>
       <div style={styles.contentMeta}>Edit <code>server.properties</code> in a structured form.</div>
+      {protectedCount > 0 && (
+        <div style={{ ...styles.contentItemMeta, marginTop: 8 }}>
+          {protectedCount} protected network/tunnel property{protectedCount === 1 ? "" : "ies"} hidden to avoid breaking tunneling (for example: <code>server-port</code>, <code>server-ip</code>, <code>query.port</code>, <code>rcon.port</code>).
+        </div>
+      )}
 
       <div style={styles.contentSearchRow}>
         <input style={styles.search} placeholder="Filter properties…" value={query} onChange={(e) => setQuery(e.target.value)} />

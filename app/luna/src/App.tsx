@@ -10,6 +10,7 @@ import { ServerCard } from "./components/ServerCard";
 import { Overlay } from "./components/Overlay";
 import { ServerModal } from "./components/ServerModal";
 import { LogsBar } from "./components/LogsBar";
+import { CreateServerWizard } from "./components/CreateServerWizard";
 import { cli } from "./lib/cli";
 import { isServerOnline, maxPlayersFor, playersOnline } from "./lib/serverRuntime";
 
@@ -20,6 +21,7 @@ export default function App() {
   const [selected, setSelected] = useState<ServerInfo | null>(null);
   const [tab, setTab] = useState<DetailTab>("details");
   const [logsOpen, setLogsOpen] = useState(false);
+  const [createWizardOpen, setCreateWizardOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [actionServerId, setActionServerId] = useState<string | null>(null);
   const startInFlightRef = useRef<Set<string>>(new Set());
@@ -388,18 +390,19 @@ export default function App() {
           <div style={styles.empty}>
             <div style={{ fontSize: 16, fontWeight: 900 }}>No servers</div>
             <div style={{ opacity: 0.75, marginTop: 6 }}>
-              Create one with the CLI for now, then hit refresh.
+              Use the + button in the bottom-right to create your first server.
             </div>
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
               <button style={btn("primary")} onClick={() => refresh()}>
                 Refresh
               </button>
             </div>
           </div>
         ) : (
-          sortedServers.map((s) => (
+          sortedServers.map((s, idx) => (
             <ServerCard
               key={s.server_id}
+              index={idx}
               server={s}
               onOpen={() => {
                 setSelected(s);
@@ -419,10 +422,10 @@ export default function App() {
   }, [actionServerId, sortedServers, loading, pendingStarts, pendingStops, refresh]);
 
   return (
-    <div style={styles.app}>
+    <div style={styles.app} className="luna-app-shell">
       <GlobalReset />
 
-      <div style={styles.topChrome}>
+      <div style={styles.topChrome} className="luna-top-chrome">
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={styles.brandDot} />
           <div>
@@ -449,6 +452,49 @@ export default function App() {
       )}
 
       {content}
+
+      <button
+        type="button"
+        onClick={() => setCreateWizardOpen(true)}
+        aria-label="Create server"
+        title="Create server"
+        className="luna-create-fab"
+        style={{
+          position: "fixed",
+          right: "clamp(14px, 1.6vw, 24px)",
+          bottom: logsOpen ? "calc(var(--logs-open-height) + 66px)" : "88px",
+          width: "var(--luna-fab-size)",
+          height: "var(--luna-fab-size)",
+          borderRadius: 999,
+          border: "1px solid rgba(56,189,248,.6)",
+          background: "linear-gradient(145deg, rgba(56,189,248,.62), rgba(37,99,235,.58))",
+          color: "rgba(255,255,255,.96)",
+          boxShadow: "0 14px 34px rgba(2,132,199,.32), 0 18px 42px rgba(0,0,0,.45)",
+          fontSize: "clamp(30px, 2.5vw, 37px)",
+          lineHeight: "1",
+          fontWeight: 900,
+          display: "grid",
+          placeItems: "center",
+          cursor: "pointer",
+          zIndex: 55,
+          padding: 0,
+          transition: "transform 160ms ease, bottom 220ms ease, filter 160ms ease",
+        }}
+      >
+        +
+      </button>
+
+      {createWizardOpen && (
+        <Overlay onClose={() => setCreateWizardOpen(false)}>
+          <CreateServerWizard
+            addLog={addLog}
+            onClose={() => setCreateWizardOpen(false)}
+            onInstalled={async () => {
+              await refresh({ silent: true });
+            }}
+          />
+        </Overlay>
+      )}
 
       {selectedServer && (
         <Overlay onClose={() => setSelected(null)}>

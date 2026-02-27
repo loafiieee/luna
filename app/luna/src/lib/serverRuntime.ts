@@ -1,4 +1,4 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ServerInfo } from "./types";
 
 const PLAYER_LIST_KEYS = [
@@ -9,6 +9,10 @@ const PLAYER_LIST_KEYS = [
   "online_players",
   "player_list",
 ];
+
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
 
 function parseNonNegativeNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
@@ -75,12 +79,73 @@ export function isServerOnline(server: ServerInfo): boolean {
 
 export function serverIconUrl(server: ServerInfo): string | null {
   const derivedIconPath =
-    server.icon_path ||
     (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
+    server.icon_path ||
     (server.server_dir ? `${server.server_dir}/icon.png` : null) ||
     (server.server_dir ? `${server.server_dir}/pack.png` : null);
 
-  return derivedIconPath ? convertFileSrc(derivedIconPath) : null;
+  return derivedIconPath ? convertFileSrc(normalizePath(derivedIconPath)) : null;
+}
+
+export async function readServerIconDataUrl(server: ServerInfo): Promise<string | null> {
+  if (!server.server_dir) return null;
+  try {
+    const res = await invoke<
+      | string
+      | {
+          data_url?: string;
+          dataUrl?: string;
+          path?: string;
+          icon_path?: string;
+          iconPath?: string;
+        }
+    >("read_server_icon_data_url", {
+      serverDir: server.server_dir,
+    });
+
+    const dataUrl =
+      typeof res === "string"
+        ? res
+        : typeof res?.data_url === "string"
+          ? res.data_url
+          : typeof res?.dataUrl === "string"
+            ? res.dataUrl
+            : null;
+
+    if (dataUrl && dataUrl.startsWith("data:image/png;base64,")) {
+      return dataUrl;
+    }
+
+    const iconPath =
+      typeof res === "string"
+        ? null
+        : typeof res?.path === "string"
+          ? res.path
+          : typeof res?.icon_path === "string"
+            ? res.icon_path
+            : typeof res?.iconPath === "string"
+              ? res.iconPath
+              : null;
+
+    if (iconPath) {
+      const url = convertFileSrc(normalizePath(iconPath));
+      return `${url}${url.includes("?") ? "&" : "?"}v=${Date.now()}`;
+    }
+  } catch {
+    // If command is unavailable (for example, stale backend process),
+    // try a cache-busted file URL fallback.
+    const fallbackPath =
+      (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
+      server.icon_path ||
+      (server.server_dir ? `${server.server_dir}/icon.png` : null) ||
+      (server.server_dir ? `${server.server_dir}/pack.png` : null);
+
+    if (fallbackPath) {
+      const url = convertFileSrc(normalizePath(fallbackPath));
+      return `${url}${url.includes("?") ? "&" : "?"}v=${Date.now()}`;
+    }
+  }
+  return null;
 }
 
 export function playersOnline(server: ServerInfo): number | null {

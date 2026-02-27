@@ -34,12 +34,12 @@ export function pill(text: string, tone: "ok" | "warn" | "muted") {
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        padding: "6px 10px",
+        padding: "clamp(5px, .55vw, 7px) clamp(9px, .8vw, 11px)",
         borderRadius: 999,
         background: bg,
         color: fg,
         border: "1px solid rgba(255,255,255,.08)",
-        fontSize: 12,
+        fontSize: "clamp(11px, .72vw, 13px)",
         fontWeight: 800,
         userSelect: "none",
         whiteSpace: "nowrap",
@@ -53,24 +53,37 @@ export function pill(text: string, tone: "ok" | "warn" | "muted") {
 
 export function btn(kind: "primary" | "danger" | "ghost", size: "normal" | "icon" = "normal") {
   const base: React.CSSProperties = {
-    borderRadius: 14,
+    borderRadius: "clamp(11px, .95vw, 15px)",
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.06)",
     color: "rgba(255,255,255,.92)",
     fontWeight: 900,
     cursor: "pointer",
     userSelect: "none",
-    transition: "transform 120ms ease, background 120ms ease",
+    transition: "transform 140ms ease, background 140ms ease, filter 140ms ease, box-shadow 160ms ease",
   };
 
-  const padding = size === "icon" ? "10px 12px" : "10px 14px";
-  const fontSize = size === "icon" ? 14 : 13;
+  const padding = size === "icon" ? "clamp(9px, .85vw, 11px) clamp(11px, .95vw, 13px)" : "clamp(9px, .85vw, 11px) clamp(12px, 1vw, 15px)";
+  const fontSize = size === "icon" ? "clamp(13px, .9vw, 15px)" : "clamp(12px, .8vw, 14px)";
 
   if (kind === "primary") {
-    return { ...base, padding, fontSize, background: "rgba(59,130,246,.26)", border: "1px solid rgba(59,130,246,.40)" };
+    return {
+      ...base,
+      padding,
+      fontSize,
+      background: "linear-gradient(150deg, rgba(59,130,246,.34), rgba(56,189,248,.24))",
+      border: "1px solid rgba(59,130,246,.40)",
+      boxShadow: "0 8px 18px rgba(37,99,235,.18)",
+    };
   }
   if (kind === "danger") {
-    return { ...base, padding, fontSize, background: "rgba(239,68,68,.22)", border: "1px solid rgba(239,68,68,.34)" };
+    return {
+      ...base,
+      padding,
+      fontSize,
+      background: "linear-gradient(150deg, rgba(239,68,68,.28), rgba(248,113,113,.18))",
+      border: "1px solid rgba(239,68,68,.34)",
+    };
   }
   return { ...base, padding, fontSize, background: "rgba(255,255,255,.05)" };
 }

@@ -1,14 +1,15 @@
-import { Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, Dispatch, SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { createPortal } from "react-dom";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { DetailTab, ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
-import { isServerOnline, playersList } from "../lib/serverRuntime";
+import { isServerOnline, playersList, readServerIconDataUrl } from "../lib/serverRuntime";
 import { cli } from "../lib/cli";
 
 export type ServerModalProps = {
@@ -46,12 +47,34 @@ export function ServerModal({
   isOnline,
   actionBusy,
 }: ServerModalProps) {
-  const derivedIconPath =
-    server.icon_path ||
+  function bytesToBase64(bytes: Uint8Array): string {
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  function normalizePath(p: string): string {
+    return p.replace(/\\/g, "/");
+  }
+
+  const inputIconPath =
     (server.server_dir ? `${server.server_dir}/server-icon.png` : null) ||
+    server.icon_path ||
     (server.server_dir ? `${server.server_dir}/icon.png` : null);
-  const icon = derivedIconPath ? convertFileSrc(derivedIconPath) : null;
+  const [localIconPath, setLocalIconPath] = useState<string | null>(null);
+  const [iconRefreshToken, setIconRefreshToken] = useState<number>(0);
+  const [updatingIcon, setUpdatingIcon] = useState(false);
+  const iconFileInputRef = useRef<HTMLInputElement | null>(null);
+  const derivedIconPath = localIconPath ?? inputIconPath;
+  const icon = useMemo(() => {
+    if (!derivedIconPath) return null;
+    return convertFileSrc(normalizePath(derivedIconPath));
+  }, [derivedIconPath]);
   const defaultIcon = new URL("/default-server-icon.png", window.location.origin).toString();
+  const [iconImgSrc, setIconImgSrc] = useState<string>(defaultIcon);
 
   const [playerSearch, setPlayerSearch] = useState("");
   const [copiedAddress, setCopiedAddress] = useState(false);
@@ -88,6 +111,29 @@ export function ServerModal({
     setBannedPlayers([]);
     setBannedIps([]);
   }, [server.server_id]);
+
+  useEffect(() => {
+    setLocalIconPath(null);
+    setIconRefreshToken(Date.now());
+  }, [server.server_id]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateIcon() {
+      setIconImgSrc(icon ?? defaultIcon);
+      const dataUrl = await readServerIconDataUrl(server);
+      if (!cancelled && dataUrl) {
+        setIconImgSrc(dataUrl);
+      }
+    }
+
+    void hydrateIcon();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [server.server_id, server.server_dir, icon, defaultIcon, iconRefreshToken]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -227,20 +273,137 @@ async function copyAddress() {
     }
   }
 
+  async function convertImageFileToServerIconPng(file: File): Promise<Uint8Array> {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error("Could not decode image"));
+        el.src = objectUrl;
+      });
+
+      const size = 64;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Could not initialize canvas context");
+
+      ctx.clearRect(0, 0, size, size);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
+      const scale = Math.max(size / img.width, size / img.height);
+      const drawWidth = img.width * scale;
+      const drawHeight = img.height * scale;
+      const dx = (size - drawWidth) / 2;
+      const dy = (size - drawHeight) / 2;
+      ctx.drawImage(img, dx, dy, drawWidth, drawHeight);
+
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("Could not encode PNG");
+      return new Uint8Array(await blob.arrayBuffer());
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  function openIconPicker() {
+    if (updatingIcon) return;
+    iconFileInputRef.current?.click();
+  }
+
+  async function onIconFileSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) return;
+    if (!server.server_dir) {
+      addLog("err", `Cannot update icon for "${server.name}" because server directory is missing.`);
+      return;
+    }
+
+    try {
+      setUpdatingIcon(true);
+      const pngBytes = await convertImageFileToServerIconPng(file);
+      setIconImgSrc(`data:image/png;base64,${bytesToBase64(pngBytes)}`);
+      const res = await invoke<{ path: string }>("write_server_icon_png", {
+        serverDir: server.server_dir,
+        pngBytes: Array.from(pngBytes),
+      });
+      const nextPath = typeof res?.path === "string" && res.path ? res.path : `${server.server_dir}/server-icon.png`;
+      setLocalIconPath(nextPath);
+      setIconRefreshToken(Date.now());
+      addLog("ok", `Updated icon for "${server.name}".`);
+      onLiveRefresh();
+      window.setTimeout(() => onLiveRefresh(), 260);
+    } catch (e: any) {
+      addLog("err", `Failed to update icon: ${String(e)}`);
+    } finally {
+      setUpdatingIcon(false);
+    }
+  }
+
   return (
-    <div style={styles.modal}>
-      <div style={styles.modalTopBar}>
+    <div style={styles.modal} className="server-modal-shell">
+      <input
+        ref={iconFileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={onIconFileSelected}
+      />
+
+      <div style={styles.modalTopBar} className="server-modal-top">
         <div style={styles.modalTopLeft}>
-          <div style={styles.modalIcon}>
+          <button
+            type="button"
+            className="server-icon-button"
+            data-busy={updatingIcon ? "true" : undefined}
+            style={{
+              ...styles.modalIcon,
+              padding: 0,
+              cursor: updatingIcon ? "wait" : "pointer",
+              position: "relative",
+              transition: "transform 150ms ease, filter 160ms ease",
+            }}
+            onClick={openIconPicker}
+            title={updatingIcon ? "Updating icon..." : "Click to change server icon"}
+            disabled={updatingIcon}
+          >
             <img
-              src={icon ?? defaultIcon}
+              src={iconImgSrc}
               alt="server icon"
+              key={`${derivedIconPath ?? "default"}:${iconRefreshToken}`}
               style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).src = defaultIcon;
+              onError={() => {
+                if (iconImgSrc !== defaultIcon) {
+                  setIconImgSrc(defaultIcon);
+                }
               }}
             />
-          </div>
+            <div
+              className="server-icon-change-chip"
+              style={{
+                position: "absolute",
+                left: 2,
+                right: 2,
+                bottom: 2,
+                borderRadius: 8,
+                padding: "2px 4px",
+                fontSize: 9,
+                fontWeight: 900,
+                textTransform: "uppercase",
+                letterSpacing: 0.3,
+                textAlign: "center",
+                color: "rgba(240,249,255,.95)",
+                background: "rgba(2,6,23,.62)",
+                border: "1px solid rgba(186,230,253,.22)",
+              }}
+            >
+              {updatingIcon ? "Saving..." : "Change"}
+            </div>
+          </button>
 
           <div style={{ minWidth: 0 }}>
             <div style={styles.modalTitleRow}>
@@ -279,8 +442,9 @@ async function copyAddress() {
           </div>
         </div>
 
-        <div style={styles.modalTopRight}>
+        <div style={styles.modalTopRight} className="server-modal-top-right">
           <button
+            className="server-modal-start-btn"
             style={btn(isOnline ? "danger" : "primary")}
             onClick={() => {
               addLog("info", `${actionBusy ? (isOnline ? "Stopping…" : "Starting…") : (isOnline ? "Stop" : "Start")} clicked for "${server.name}".`);
@@ -293,6 +457,7 @@ async function copyAddress() {
 
           <button
             type="button"
+            className="server-modal-address-btn"
             style={{ ...styles.addrButton, ...(copiedAddress ? styles.addrButtonCopied : {}) }}
             onClick={copyAddress}
             title={address ? "Click to copy" : "No public address yet"}
@@ -303,14 +468,19 @@ async function copyAddress() {
             <div style={styles.addrHint}>{copiedAddress ? "Copied" : "Click to copy"}</div>
           </button>
 
-          <button style={btn("ghost")} onClick={onRequestClose} title="Close">
+          <button
+            className="server-modal-close-btn"
+            style={{ ...btn("ghost"), flexShrink: 0, marginRight: 4 }}
+            onClick={onRequestClose}
+            title="Close"
+          >
             ✕
           </button>
         </div>
       </div>
 
-      <div style={styles.modalBody}>
-        <div style={styles.leftNav}>
+      <div style={styles.modalBody} className="server-modal-body">
+        <div style={styles.leftNav} className="server-modal-left">
           <NavItem label="Details" active={tab === "details"} onClick={() => setTab("details")} />
           <NavItem label="Console" active={tab === "console"} onClick={() => setTab("console")} />
           <NavItem label="Content" active={tab === "content"} onClick={() => setTab("content")} />
@@ -319,7 +489,7 @@ async function copyAddress() {
           <NavItem label="Settings" active={tab === "settings"} onClick={() => setTab("settings")} />
           <NavItem label={openingFolder ? "Opening Folder…" : "Server Folder"} active={false} onClick={() => void openServerFolderFromSidebar()} />
 
-          <div style={styles.leftNavFooter}>
+          <div style={styles.leftNavFooter} className="server-modal-left-footer">
             <button
               type="button"
               style={styles.deleteServerBtn}
@@ -332,17 +502,17 @@ async function copyAddress() {
           </div>
         </div>
 
-        <div style={styles.centerPane}>
+        <div style={styles.centerPane} className="server-modal-center">
           {tab === "details" && <DetailsPane server={server} />}
           {tab === "console" && <ConsolePane server={server} addLog={addLog} isOnline={isOnline} actionBusy={actionBusy} />}
           {tab === "content" && <ContentPane server={server} addLog={addLog} />}
           {tab === "backups" && <BackupsPane server={server} addLog={addLog} />}
           {tab === "tunnels" && <TunnelsPane server={server} addLog={addLog} onLiveRefresh={onLiveRefresh} />}
           {tab === "settings" && <SettingsPane server={server} addLog={addLog} />}
-          {tab === "server_folder" && <PlaceholderPane title="Server Folder" desc="Open folder, open logs, etc." />}
+          {tab === "server_folder" && <ServerFolderPane server={server} addLog={addLog} />}
         </div>
 
-        <div style={styles.rightPane}>
+        <div style={styles.rightPane} className="server-modal-right">
           <div style={styles.playersHeader}>
             <div style={{ fontWeight: 900 }}>Online Players</div>
             <div style={{ opacity: 0.7 }}>{(typeof onlinePlayers === "number" ? onlinePlayers : 0)}/{maxPlayers}</div>
@@ -420,7 +590,7 @@ async function copyAddress() {
                   name={p.name}
                   headUrl={p.head_url}
                   onOpenMenu={(name, evt) => {
-                    const rect = (evt.currentTarget as HTMLDivElement).getBoundingClientRect();
+                    const rect = evt.currentTarget.getBoundingClientRect();
                     setPlayerActionMenu({ name, x: rect.right - 10, y: rect.top + rect.height });
                   }}
                 />
@@ -443,38 +613,52 @@ async function copyAddress() {
       </div>
 
       {playerActionMenu && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 65,
-          }}
-          onClick={() => setPlayerActionMenu(null)}
-        >
+        createPortal(
           <div
             style={{
               position: "fixed",
-              left: Math.max(8, playerActionMenu.x - 180),
-              top: Math.max(8, playerActionMenu.y + 8),
-              width: 180,
-              padding: 8,
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,.12)",
-              background: "rgba(7,12,24,.98)",
-              boxShadow: "0 12px 30px rgba(0,0,0,.5)",
+              inset: 0,
+              zIndex: 120,
             }}
-            onClick={(e) => e.stopPropagation()}
+            onMouseDown={() => setPlayerActionMenu(null)}
           >
-            <div style={{ padding: "4px 8px", opacity: 0.65, fontSize: 12, fontWeight: 800 }}>
-              {playerActionMenu.name}
+            <div
+              style={{
+                position: "fixed",
+                left: (() => {
+                  const menuWidth = 188;
+                  const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
+                  return Math.min(Math.max(8, playerActionMenu.x - menuWidth + 10), maxLeft);
+                })(),
+                top: (() => {
+                  const menuHeight = 248;
+                  const preferUp = playerActionMenu.y + menuHeight + 8 > window.innerHeight;
+                  const rawTop = preferUp ? playerActionMenu.y - menuHeight - 8 : playerActionMenu.y + 8;
+                  const maxTop = Math.max(8, window.innerHeight - menuHeight - 8);
+                  return Math.min(Math.max(8, rawTop), maxTop);
+                })(),
+                width: 188,
+                padding: 8,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,.16)",
+                background: "rgba(7,12,24,.99)",
+                boxShadow: "0 14px 32px rgba(0,0,0,.56)",
+                backdropFilter: "blur(8px)",
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div style={{ padding: "4px 8px", opacity: 0.65, fontSize: 12, fontWeight: 800 }}>
+                {playerActionMenu.name}
+              </div>
+              <MenuItem label="Copy username" onClick={() => runPlayerCommand("copy", playerActionMenu.name)} disabled={playerActionBusy} />
+              <MenuItem label="Kick" onClick={() => setConfirmPlayerAction({ action: "kick", name: playerActionMenu.name })} disabled={playerActionBusy} />
+              <MenuItem label="Ban" onClick={() => setConfirmPlayerAction({ action: "ban", name: playerActionMenu.name })} disabled={playerActionBusy} />
+              <MenuItem label="Op" onClick={() => runPlayerCommand("op", playerActionMenu.name)} disabled={playerActionBusy} />
+              <MenuItem label="Deop" onClick={() => runPlayerCommand("deop", playerActionMenu.name)} disabled={playerActionBusy} />
             </div>
-            <MenuItem label="Copy username" onClick={() => runPlayerCommand("copy", playerActionMenu.name)} disabled={playerActionBusy} />
-            <MenuItem label="Kick" onClick={() => setConfirmPlayerAction({ action: "kick", name: playerActionMenu.name })} disabled={playerActionBusy} />
-            <MenuItem label="Ban" onClick={() => setConfirmPlayerAction({ action: "ban", name: playerActionMenu.name })} disabled={playerActionBusy} />
-            <MenuItem label="Op" onClick={() => runPlayerCommand("op", playerActionMenu.name)} disabled={playerActionBusy} />
-            <MenuItem label="Deop" onClick={() => runPlayerCommand("deop", playerActionMenu.name)} disabled={playerActionBusy} />
-          </div>
-        </div>
+          </div>,
+          document.body,
+        )
       )}
 
       {confirmPlayerAction && (
@@ -581,12 +765,13 @@ function NavItem({ label, active, onClick }: { label: string; active: boolean; o
       style={{
         width: "100%",
         textAlign: "left",
-        padding: "10px 12px",
+        padding: "clamp(9px, .8vw, 11px) clamp(10px, .9vw, 13px)",
         borderRadius: 12,
         border: "1px solid rgba(255,255,255,.08)",
         background: active ? "rgba(255,255,255,.10)" : "transparent",
         color: "rgba(255,255,255,.92)",
         fontWeight: active ? 900 : 700,
+        fontSize: "clamp(12px, .8vw, 13px)",
         cursor: "pointer",
       }}
     >
@@ -611,12 +796,13 @@ function MenuItem({
       style={{
         width: "100%",
         textAlign: "left",
-        padding: "8px 10px",
+        padding: "clamp(7px, .65vw, 9px) clamp(9px, .85vw, 11px)",
         borderRadius: 12,
         border: "1px solid rgba(255,255,255,.06)",
         background: "rgba(255,255,255,.04)",
         color: "rgba(255,255,255,.92)",
         fontWeight: 900,
+        fontSize: "clamp(12px, .8vw, 13px)",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.45 : 1,
         marginBottom: 6,
@@ -634,12 +820,16 @@ function PlayerRow({
 }: {
   name: string;
   headUrl?: string;
-  onOpenMenu: (name: string, evt: import("react").MouseEvent<HTMLDivElement>) => void;
+  onOpenMenu: (name: string, evt: import("react").MouseEvent<HTMLElement>) => void;
 }) {
   return (
     <div
       style={{ ...styles.playerRow, cursor: "pointer" }}
       onClick={(e) => onOpenMenu(name, e)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onOpenMenu(name, e);
+      }}
       title="Click for actions"
     >
       <div style={styles.playerHead}>
@@ -650,7 +840,27 @@ function PlayerRow({
         )}
       </div>
       <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>{name}</div>
-      <div style={{ opacity: 0.65, fontWeight: 900 }}>⋯</div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenMenu(name, e);
+        }}
+        style={{
+          border: "1px solid rgba(255,255,255,.14)",
+          background: "rgba(255,255,255,.06)",
+          color: "rgba(255,255,255,.88)",
+          borderRadius: 9,
+          padding: "2px 8px",
+          fontWeight: 900,
+          lineHeight: 1.2,
+          cursor: "pointer",
+          opacity: 0.9,
+        }}
+        title="Player actions"
+      >
+        ⋯
+      </button>
     </div>
   );
 }
@@ -705,10 +915,24 @@ function ConsolePane({
   useEffect(() => {
     const term = new Terminal({
       convertEol: true,
-      fontSize: 12,
+      fontSize: 13,
+      fontFamily: "\"Cascadia Mono\", \"JetBrains Mono\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      lineHeight: 1.25,
       cursorBlink: true,
       theme: {
-        background: "#020617",
+        background: "#040916",
+        foreground: "#dbeafe",
+        cursor: "#38bdf8",
+        cursorAccent: "#0f172a",
+        selectionBackground: "rgba(56,189,248,.28)",
+        black: "#0b1220",
+        red: "#fb7185",
+        green: "#4ade80",
+        yellow: "#facc15",
+        blue: "#60a5fa",
+        magenta: "#c084fc",
+        cyan: "#22d3ee",
+        white: "#dbeafe",
       },
       scrollback: 5000,
       disableStdin: true,
@@ -790,9 +1014,68 @@ function ConsolePane({
     <div>
       <div style={styles.paneTitle}>Console</div>
       <div style={styles.consoleHint}>Live output from runtime console. Type commands below to send to server stdin.</div>
-      {!isOnline && <div style={{ marginTop: 8, opacity: 0.8 }}>Waiting for server start…</div>}
+      {!isOnline && (
+        <div
+          style={{
+            marginTop: 8,
+            opacity: 0.85,
+            fontSize: 12,
+            fontWeight: 700,
+            color: "rgba(191,219,254,.94)",
+          }}
+        >
+          Waiting for server start...
+        </div>
+      )}
 
-      <div style={styles.consoleView} ref={containerRef} />
+      <div
+        style={{
+          ...styles.consoleView,
+          padding: 0,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          background: "linear-gradient(180deg, rgba(2,6,23,.95), rgba(2,6,23,.9))",
+          boxShadow: "inset 0 0 0 1px rgba(148,163,184,.14)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "7px 10px",
+            borderBottom: "1px solid rgba(148,163,184,.18)",
+            background: "rgba(15,23,42,.62)",
+            fontSize: 11,
+            fontWeight: 800,
+            color: "rgba(191,219,254,.86)",
+          }}
+        >
+          <div>Runtime Stream</div>
+          <div
+            style={{
+              borderRadius: 999,
+              padding: "3px 8px",
+              border: `1px solid ${isOnline ? "rgba(34,197,94,.5)" : "rgba(248,113,113,.45)"}`,
+              background: isOnline ? "rgba(34,197,94,.16)" : "rgba(248,113,113,.12)",
+              color: isOnline ? "rgba(134,239,172,.95)" : "rgba(252,165,165,.95)",
+            }}
+          >
+            {isOnline ? "Connected" : actionBusy ? "Starting..." : "Offline"}
+          </div>
+        </div>
+
+        <div
+          ref={containerRef}
+          style={{
+            flex: 1,
+            minHeight: 0,
+            padding: "clamp(6px, .65vw, 10px)",
+          }}
+        />
+      </div>
 
       <div style={styles.consoleInputRow}>
         <input
@@ -1793,13 +2076,28 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
       <div style={styles.paneTitle}>Backups</div>
       <div style={styles.contentMeta}>Create, restore, and delete snapshots for this server. Restore will automatically stop a running server first.</div>
 
-      <div style={styles.contentSearchRow}>
-        <input style={styles.search} placeholder="Optional backup label…" value={label} onChange={(e) => setLabel(e.target.value)} />
-        <button type="button" style={btn("primary")} disabled={creating} onClick={() => void createBackup()}>{creating ? "Creating…" : "Create Backup"}</button>
-        <button type="button" style={btn("ghost")} disabled={loading} onClick={() => void refreshBackups()}>{loading ? "Refreshing…" : "Refresh"}</button>
+      <div style={{ ...styles.contentSearchRow, flexWrap: "wrap" }}>
+        <input
+          style={{ ...styles.search, flex: "1 1 240px", minWidth: 200 }}
+          placeholder="Optional backup label..."
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+        />
+        <button type="button" style={btn("primary")} disabled={creating} onClick={() => void createBackup()}>{creating ? "Creating..." : "Create Backup"}</button>
+        <button type="button" style={btn("ghost")} disabled={loading} onClick={() => void refreshBackups()}>{loading ? "Refreshing..." : "Refresh"}</button>
       </div>
 
-      <div style={{ ...styles.contentItem, marginBottom: 10, alignItems: "end" }}>
+      <div
+        style={{
+          ...styles.contentItem,
+          marginBottom: 12,
+          alignItems: "end",
+          border: "1px solid rgba(56,189,248,.26)",
+          background: "linear-gradient(160deg, rgba(15,23,42,.86), rgba(2,6,23,.68))",
+          borderRadius: 16,
+          boxShadow: "0 10px 24px rgba(2,6,23,.35)",
+        }}
+      >
         <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 8 }}>
           <div style={styles.contentItemTitle}>Scheduled backups</div>
           <div style={styles.contentItemMeta}>Enable automatic backups with retention cleanup.</div>
@@ -1856,10 +2154,20 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
             const sizeMb = typeof b.size_bytes === "number" ? `${(b.size_bytes / (1024 * 1024)).toFixed(2)} MB` : "—";
             const displayLabel = b.label?.trim() || b.backup_id;
             return (
-              <div key={b.backup_id} style={styles.contentItem}>
-                <div style={{ minWidth: 0, flex: 1 }}>
+              <div
+                key={b.backup_id}
+                style={{
+                  ...styles.contentItem,
+                  padding: 12,
+                  borderRadius: 14,
+                  border: "1px solid rgba(148,163,184,.2)",
+                  background: "linear-gradient(170deg, rgba(15,23,42,.74), rgba(2,6,23,.56))",
+                }}
+              >
+                <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 5 }}>
                   <div style={styles.contentItemTitle}>{displayLabel}</div>
-                  <div style={styles.contentItemMeta}>{created} • {sizeMb} • {typeof b.file_count === "number" ? `${b.file_count} files` : "file count unknown"}</div>
+                  <div style={styles.contentItemMeta}>{created}</div>
+                  <div style={styles.contentItemMeta}>{sizeMb} • {typeof b.file_count === "number" ? `${b.file_count} files` : "file count unknown"}</div>
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
                   <button type="button" style={btn("ghost")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "restore", backupId: b.backup_id, backupLabel: displayLabel })}>{restoreBusy ? "Restoring…" : "Restore"}</button>
@@ -1910,9 +2218,12 @@ function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMod
 }
 
 
+type ServerPropertyValueType = "bool" | "int" | "float" | "string";
+
 type ServerPropertyRow = {
   key: string;
   value: string;
+  valueType: ServerPropertyValueType;
 };
 
 
@@ -1929,6 +2240,18 @@ function isProtectedServerProperty(key: string): boolean {
   return PROTECTED_SERVER_PROPERTIES.has(key.trim().toLowerCase());
 }
 
+function detectServerPropertyValueType(value: string): ServerPropertyValueType {
+  const trimmed = value.trim();
+  if (!trimmed) return "string";
+  const lower = trimmed.toLowerCase();
+  if (lower === "true" || lower === "false") return "bool";
+  if (/^[+-]?\d+$/.test(trimmed)) return "int";
+  if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed) || /^[+-]?\d+[eE][+-]?\d+$/.test(trimmed)) {
+    return "float";
+  }
+  return "string";
+}
+
 function parseServerProperties(content: string): ServerPropertyRow[] {
   const rows: ServerPropertyRow[] = [];
   for (const rawLine of content.split(/\r?\n/)) {
@@ -1939,7 +2262,7 @@ function parseServerProperties(content: string): ServerPropertyRow[] {
     const key = line.slice(0, idx).trim();
     const value = line.slice(idx + 1);
     if (!key) continue;
-    rows.push({ key, value });
+    rows.push({ key, value, valueType: detectServerPropertyValueType(value) });
   }
   rows.sort((a, b) => a.key.localeCompare(b.key));
   return rows;
@@ -2003,6 +2326,16 @@ function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMo
     setRows((curr) => curr.map((row) => (row.key === key ? { ...row, value: nextValue } : row)));
   }
 
+  function setIntValueByKey(key: string, nextValue: string) {
+    if (!/^[+-]?\d*$/.test(nextValue)) return;
+    setValueByKey(key, nextValue);
+  }
+
+  function toggleBoolValue(key: string, currentValue: string) {
+    const lower = currentValue.trim().toLowerCase();
+    setValueByKey(key, lower === "true" ? "false" : "true");
+  }
+
   return (
     <div>
       <div style={styles.paneTitle}>Settings</div>
@@ -2026,532 +2359,39 @@ function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerMo
           filtered.map((row) => (
             <div key={row.key} style={styles.contentItem}>
               <div style={{ minWidth: 180, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontWeight: 700 }}>{row.key}</div>
-              <input
-                style={{ ...styles.search, flex: 1 }}
-                value={row.value}
-                onChange={(e) => setValueByKey(row.key, e.target.value)}
-              />
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PlaceholderPane({ title, desc }: { title: string; desc: string }) {
-  return (
-    <div>
-      <div style={styles.paneTitle}>Content</div>
-      <div style={styles.contentTabRow}>
-        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "primary" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("primary")}>{primaryLabel}</button>
-        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "datapack" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("datapack")}>Datapacks</button>
-        <button type="button" style={{ ...styles.contentTabBtn, ...(tab === "installed" ? styles.contentTabBtnActive : {}) }} onClick={() => setTab("installed")}>Installed</button>
-      </div>
-
-      <div style={styles.contentMeta}>{tab === "installed" ? "Manage installed content and configs." : `Showing ${activeProjectType}s relevant to this server${loader ? ` • loader: ${loader}` : ""}${gameVersion ? ` • MC ${gameVersion}` : ""}`}</div>
-
-      {tab !== "installed" && (
-        <>
-          <div style={styles.contentSearchRow}>
-            <input style={styles.search} placeholder={`Search ${activeProjectType}s on Modrinth…`} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void runSearch(query); } }} />
-            <button type="button" style={btn("primary")} onClick={() => void runSearch(query)} disabled={loading}>{loading ? "Searching…" : "Search"}</button>
-          </div>
-          <div style={styles.contentSearchRow}>
-            <select style={styles.contentSelect} value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
-              {categoryOptions.map((cat) => <option key={cat} value={cat}>{cat === "all" ? "All categories" : cat}</option>)}
-            </select>
-          </div>
-          {err && <div style={styles.consoleError}>Search error: {err}</div>}
-          <div style={styles.contentResults}>
-            {shownItems.length === 0 ? <div style={styles.playersEmpty}>{loading ? "Loading…" : "No results found for this server/version."}</div> : shownItems.map((item) => {
-              const id = String(item.project_id ?? "");
-              const title = item.title || id;
-              const installing = installingId === id;
-              const isInstalled = installedIds.has(id);
-              const icon = typeof item.icon_url === "string" ? item.icon_url : null;
-              return (
-                <div key={id} style={styles.contentItemBtn} onClick={() => setSelectedItem(item)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedItem(item); } }}>
-                  <div style={styles.contentItem}>
-                    <div style={styles.contentThumbWrap}>{icon ? <img src={icon} alt="project" style={styles.contentThumb} /> : <div style={styles.contentThumbPlaceholder}>?</div>}</div>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={styles.contentItemTitle}>{title}</div>
-                      <div style={styles.contentItemMeta}>by {item.author ?? "unknown"} • {Number(item.downloads ?? 0).toLocaleString()} downloads</div>
-                      <div style={styles.contentItemDesc}>{item.description ?? "No description."}</div>
-                    </div>
-                    <button type="button" style={btn(isInstalled ? "ghost" : "primary")} onClick={(e) => { e.stopPropagation(); if (!isInstalled) void installProject(id); }} disabled={installing || !id || isInstalled}>{isInstalled ? "Installed" : installing ? "Installing…" : "Install"}</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {tab === "installed" && (
-        <div style={styles.contentResults}>
-          {renderInstalledSection(primaryLabel, primaryType, installedByType.primary)}
-          {renderInstalledSection("Datapacks", "datapack", installedByType.datapack)}
-        </div>
-      )}
-
-      {selectedItem && tab !== "installed" && (
-        <div style={styles.contentOverlay} onClick={() => setSelectedItem(null)}>
-          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.contentModalHead}>
-              <div style={{ fontWeight: 900 }}>{selectedItem.title ?? selectedItem.project_id}</div>
-              <button type="button" style={btn("ghost")} onClick={() => setSelectedItem(null)}>Close</button>
-            </div>
-            <div style={styles.contentModalBody}>
-              {selectedItem.icon_url ? <img src={selectedItem.icon_url} alt="project" style={styles.contentModalImage} /> : null}
-              <div style={styles.contentItemDesc}>{selectedItem.description ?? "No description."}</div>
-              <div style={styles.contentItemMeta}>Author: {selectedItem.author ?? "unknown"}</div>
-              <div style={styles.contentItemMeta}>Downloads: {Number(selectedItem.downloads ?? 0).toLocaleString()}</div>
-              <div style={styles.contentItemMeta}>Categories: {normalizeCategories(selectedItem).join(", ") || "—"}</div>
-              <div style={styles.contentItemMeta}>Versions: {Array.isArray(selectedItem.versions) ? selectedItem.versions.join(", ") : "—"}</div>
-            </div>
-            <div style={styles.contentModalActions}>
-              <button type="button" style={btn(installedIds.has(String(selectedItem.project_id ?? "")) ? "ghost" : "primary")} onClick={() => { const pid = String(selectedItem.project_id ?? ""); if (!installedIds.has(pid)) void installProject(pid); }} disabled={installingId === String(selectedItem.project_id ?? "") || !selectedItem.project_id || installedIds.has(String(selectedItem.project_id ?? ""))}>{installedIds.has(String(selectedItem.project_id ?? "")) ? "Installed" : installingId === String(selectedItem.project_id ?? "") ? "Installing…" : "Install"}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {configPicker && (
-        <div style={styles.contentOverlay} onClick={() => setConfigPicker(null)}>
-          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.contentModalHead}>
-              <div style={{ fontWeight: 900 }}>{configPicker.manual ? `Config file picker — ${configPicker.projectTitle}` : `Choose config file — ${configPicker.projectTitle}`}</div>
-              <button type="button" style={btn("ghost")} onClick={() => setConfigPicker(null)}>Close</button>
-            </div>
-            <div style={styles.contentModalBody}>
-              {configPicker.manual && <div style={styles.contentItemMeta}>Could not auto-detect config. Select a file from {configPicker.baseRelative ?? "the expected directory"}.</div>}
-              {configPicker.candidates.map((c) => (
-                <button key={c.relative_path} type="button" style={styles.contentPickerBtn} onClick={() => void openConfigFile(configPicker.projectType, configPicker.projectId, configPicker.projectTitle, c.relative_path, Boolean(configPicker.manual))}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={styles.contentItemTitle}>{c.relative_path}</div>
-                    <div style={styles.contentItemMeta}>{c.reason ?? "match"}{typeof c.score === "number" ? ` • score ${c.score}` : ""}</div>
-                  </div>
+              {row.valueType === "bool" ? (
+                <button
+                  type="button"
+                  style={{ ...btn(row.value.trim().toLowerCase() === "true" ? "primary" : "ghost"), minWidth: 120 }}
+                  onClick={() => toggleBoolValue(row.key, row.value)}
+                >
+                  {row.value.trim().toLowerCase() === "true" ? "True" : "False"}
                 </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {editorState && (
-        <div style={styles.contentOverlay} onClick={() => { void closeEditor(); }}>
-          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.contentModalHead}>
-              <div style={{ fontWeight: 900 }}>Edit config — {editorState.projectTitle}</div>
-              <button type="button" style={btn("ghost")} onClick={() => { void closeEditor(); }} disabled={editorState.dirty || editorState.saving}>Close</button>
-            </div>
-            <div style={styles.contentModalBody}>
-              <div style={styles.contentItemMeta}>{editorState.relativePath}</div>
-              {editorState.justSaved && <div style={styles.contentSaveOk}>Saved.</div>}
-              <textarea
-                style={styles.configEditorArea}
-                value={editorState.content}
-                onChange={(e) => setEditorState((prev) => (prev ? { ...prev, content: e.target.value, dirty: true, justSaved: false } : prev))}
-              />
-            </div>
-            <div style={styles.contentModalActions}>
-              <button type="button" style={btn("primary")} disabled={!editorState.dirty || editorState.saving} onClick={() => void saveEditor()}>{editorState.saving ? "Saving…" : "Save"}</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {preferredPrompt && (
-        <div style={styles.contentOverlay} onClick={() => setPreferredPrompt(null)}>
-          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.contentModalHead}>
-              <div style={{ fontWeight: 900 }}>Use this config file by default?</div>
-              <button type="button" style={btn("ghost")} onClick={() => setPreferredPrompt(null)}>Close</button>
-            </div>
-            <div style={styles.contentModalBody}>
-              <div style={styles.contentItemDesc}>Always use this config file for <strong>{preferredPrompt.projectTitle}</strong>?</div>
-              <div style={styles.contentItemMeta}>{preferredPrompt.relativePath}</div>
-            </div>
-            <div style={styles.contentModalActions}>
-              <button type="button" style={btn("ghost")} onClick={() => setPreferredPrompt(null)}>Not now</button>
-              <button
-                type="button"
-                style={btn("primary")}
-                onClick={() => {
-                  const p = preferredPrompt;
-                  setPreferredPrompt(null);
-                  if (p) void setPreferredConfig(p.projectType, p.projectId, p.projectTitle, p.relativePath);
-                }}
-              >
-                Always use this file
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-    </div>
-  );
-}
-
-
-function BackupsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
-  const [items, setItems] = useState<Array<{ backup_id: string; created_at?: string | null; label?: string | null; size_bytes?: number; file_count?: number }>>([]);
-  const [schedule, setSchedule] = useState<{ enabled: boolean; interval_minutes: number; keep_latest: number; label_prefix: string; next_run_at?: string | null; last_run_at?: string | null; last_error?: string | null } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [savingSchedule, setSavingSchedule] = useState(false);
-  const [runningScheduleNow, setRunningScheduleNow] = useState(false);
-  const [label, setLabel] = useState("");
-  const [confirmAction, setConfirmAction] = useState<{ type: "restore" | "delete"; backupId: string; backupLabel: string } | null>(null);
-
-  async function refreshBackups() {
-    try {
-      setLoading(true);
-      const [res, scheduleRes] = await Promise.all([
-        cli<any>("backup_list", server.server_id),
-        cli<any>("backup_schedule_get", server.server_id),
-      ]);
-      const rows = Array.isArray(res?.data?.backups) ? res.data.backups : [];
-      setItems(rows);
-      setSchedule(scheduleRes?.data?.schedule ?? null);
-    } catch (e: any) {
-      addLog("err", `Failed to load backups: ${String(e)}`);
-      setItems([]);
-      setSchedule(null);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void refreshBackups();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server.server_id]);
-
-  async function createBackup() {
-    try {
-      setCreating(true);
-      const args = ["backup_create", server.server_id];
-      if (label.trim()) args.push(`--label=${label.trim()}`);
-      await cli<any>(...args);
-      setLabel("");
-      addLog("ok", `Backup created for ${server.name}.`);
-      await refreshBackups();
-    } catch (e: any) {
-      addLog("err", `Backup creation failed: ${String(e)}`);
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  async function restoreBackup(backupId: string) {
-    try {
-      setBusyId(`restore:${backupId}`);
-      const res = await cli<any>("backup_restore", server.server_id, backupId);
-      if (Boolean(res?.data?.auto_stopped)) {
-        addLog("warn", `Server was running and was stopped automatically before restore.`);
-      }
-      addLog("ok", `Backup ${backupId} restored.`);
-    } catch (e: any) {
-      addLog("err", `Restore failed for ${backupId}: ${String(e)}`);
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function deleteBackup(backupId: string) {
-    try {
-      setBusyId(`delete:${backupId}`);
-      await cli("backup_delete", server.server_id, backupId);
-      addLog("ok", `Backup ${backupId} deleted.`);
-      await refreshBackups();
-    } catch (e: any) {
-      addLog("err", `Delete failed for ${backupId}: ${String(e)}`);
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function saveSchedule() {
-    if (!schedule) return;
-    try {
-      setSavingSchedule(true);
-      await cli(
-        "backup_schedule_set",
-        server.server_id,
-        `--enabled=${schedule.enabled ? "true" : "false"}`,
-        `--interval-minutes=${Math.max(5, Number(schedule.interval_minutes) || 60)}`,
-        `--keep-latest=${Math.max(1, Number(schedule.keep_latest) || 10)}`,
-        `--label-prefix=${(schedule.label_prefix || "Scheduled").trim() || "Scheduled"}`,
-      );
-      addLog("ok", `Scheduled backups updated for ${server.name}.`);
-      await refreshBackups();
-    } catch (e: any) {
-      addLog("err", `Failed to save backup schedule: ${String(e)}`);
-    } finally {
-      setSavingSchedule(false);
-    }
-  }
-
-  async function runScheduledNow() {
-    try {
-      setRunningScheduleNow(true);
-      const res = await cli<any>("backup_schedule_run", server.server_id);
-      if (res?.data?.ran) addLog("ok", "Scheduled backup created now.");
-      else addLog("info", `Scheduled backup did not run (${String(res?.data?.reason || "not due")}).`);
-      await refreshBackups();
-    } catch (e: any) {
-      addLog("err", `Failed to run scheduled backup: ${String(e)}`);
-    } finally {
-      setRunningScheduleNow(false);
-    }
-  }
-
-  return (
-    <div>
-      <div style={styles.paneTitle}>Backups</div>
-      <div style={styles.contentMeta}>Create, restore, and delete snapshots for this server. Restore will automatically stop a running server first.</div>
-
-      <div style={styles.contentSearchRow}>
-        <input style={styles.search} placeholder="Optional backup label…" value={label} onChange={(e) => setLabel(e.target.value)} />
-        <button type="button" style={btn("primary")} disabled={creating} onClick={() => void createBackup()}>{creating ? "Creating…" : "Create Backup"}</button>
-        <button type="button" style={btn("ghost")} disabled={loading} onClick={() => void refreshBackups()}>{loading ? "Refreshing…" : "Refresh"}</button>
-      </div>
-
-      <div style={{ ...styles.contentItem, marginBottom: 10, alignItems: "end" }}>
-        <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 8 }}>
-          <div style={styles.contentItemTitle}>Scheduled backups</div>
-          <div style={styles.contentItemMeta}>Enable automatic backups with retention cleanup.</div>
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <input
-              type="checkbox"
-              checked={Boolean(schedule?.enabled)}
-              onChange={(e) => setSchedule((s) => ({ ...(s ?? { interval_minutes: 60, keep_latest: 10, label_prefix: "Scheduled" }), enabled: e.target.checked } as any))}
-            />
-            <span>Enabled</span>
-          </label>
-          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))" }}>
-            <input
-              style={styles.search}
-              type="number"
-              min={5}
-              value={schedule?.interval_minutes ?? 60}
-              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, keep_latest: 10, label_prefix: "Scheduled" }), interval_minutes: Number(e.target.value) || 60 } as any))}
-              placeholder="Interval (minutes)"
-            />
-            <input
-              style={styles.search}
-              type="number"
-              min={1}
-              value={schedule?.keep_latest ?? 10}
-              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, interval_minutes: 60, label_prefix: "Scheduled" }), keep_latest: Number(e.target.value) || 10 } as any))}
-              placeholder="Keep latest"
-            />
-            <input
-              style={styles.search}
-              value={schedule?.label_prefix ?? "Scheduled"}
-              onChange={(e) => setSchedule((s) => ({ ...(s ?? { enabled: false, interval_minutes: 60, keep_latest: 10 }), label_prefix: e.target.value } as any))}
-              placeholder="Label prefix"
-            />
-          </div>
-          {schedule?.next_run_at && <div style={styles.contentItemMeta}>Next run: {new Date(schedule.next_run_at).toLocaleString()}</div>}
-          {schedule?.last_run_at && <div style={styles.contentItemMeta}>Last run: {new Date(schedule.last_run_at).toLocaleString()}</div>}
-          {schedule?.last_error && <div style={{ ...styles.contentItemMeta, color: "#ff9a9a" }}>Last error: {schedule.last_error}</div>}
-        </div>
-        <div style={{ display: "grid", gap: 6 }}>
-          <button type="button" style={btn("primary")} disabled={savingSchedule || !schedule} onClick={() => void saveSchedule()}>{savingSchedule ? "Saving…" : "Save Schedule"}</button>
-          <button type="button" style={btn("ghost")} disabled={runningScheduleNow} onClick={() => void runScheduledNow()}>{runningScheduleNow ? "Running…" : "Run Due Now"}</button>
-        </div>
-      </div>
-
-      <div style={styles.contentResults}>
-        {items.length === 0 ? (
-          <div style={styles.playersEmpty}>{loading ? "Loading backups…" : "No backups yet."}</div>
-        ) : (
-          items.map((b) => {
-            const restoreBusy = busyId === `restore:${b.backup_id}`;
-            const deleteBusy = busyId === `delete:${b.backup_id}`;
-            const created = b.created_at ? new Date(b.created_at).toLocaleString() : b.backup_id;
-            const sizeMb = typeof b.size_bytes === "number" ? `${(b.size_bytes / (1024 * 1024)).toFixed(2)} MB` : "—";
-            const displayLabel = b.label?.trim() || b.backup_id;
-            return (
-              <div key={b.backup_id} style={styles.contentItem}>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={styles.contentItemTitle}>{displayLabel}</div>
-                  <div style={styles.contentItemMeta}>{created} • {sizeMb} • {typeof b.file_count === "number" ? `${b.file_count} files` : "file count unknown"}</div>
-                </div>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <button type="button" style={btn("ghost")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "restore", backupId: b.backup_id, backupLabel: displayLabel })}>{restoreBusy ? "Restoring…" : "Restore"}</button>
-                  <button type="button" style={btn("danger")} disabled={restoreBusy || deleteBusy} onClick={() => setConfirmAction({ type: "delete", backupId: b.backup_id, backupLabel: displayLabel })}>{deleteBusy ? "Deleting…" : "Delete"}</button>
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      {confirmAction && (
-        <div style={styles.contentOverlay} onClick={() => setConfirmAction(null)}>
-          <div style={styles.contentModal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.contentModalHead}>
-              <div style={{ fontWeight: 900 }}>{confirmAction.type === "restore" ? "Restore backup?" : "Delete backup?"}</div>
-              <button type="button" style={btn("ghost")} onClick={() => setConfirmAction(null)}>Close</button>
-            </div>
-            <div style={styles.contentModalBody}>
-              <div style={styles.contentItemDesc}>{confirmAction.backupLabel}</div>
-              <div style={styles.contentItemMeta}>
-                {confirmAction.type === "restore"
-                  ? "Current server files will be replaced. If running, the server will be stopped automatically before restore."
-                  : "This backup archive and metadata will be removed permanently."}
-              </div>
-            </div>
-            <div style={styles.contentModalActions}>
-              <button type="button" style={btn("ghost")} onClick={() => setConfirmAction(null)}>Cancel</button>
-              <button
-                type="button"
-                style={btn(confirmAction.type === "restore" ? "primary" : "danger")}
-                onClick={() => {
-                  const action = confirmAction;
-                  setConfirmAction(null);
-                  if (!action) return;
-                  if (action.type === "restore") void restoreBackup(action.backupId);
-                  else void deleteBackup(action.backupId);
-                }}
-              >
-                {confirmAction.type === "restore" ? "Restore" : "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-type ServerPropertyRow = {
-  key: string;
-  value: string;
-};
-
-
-const PROTECTED_SERVER_PROPERTIES = new Set([
-  "server-port",
-  "server-ip",
-  "query.port",
-  "enable-query",
-  "rcon.port",
-  "enable-rcon",
-]);
-
-function isProtectedServerProperty(key: string): boolean {
-  return PROTECTED_SERVER_PROPERTIES.has(key.trim().toLowerCase());
-}
-
-function parseServerProperties(content: string): ServerPropertyRow[] {
-  const rows: ServerPropertyRow[] = [];
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
-    const idx = line.indexOf("=");
-    if (idx < 0) continue;
-    const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1);
-    if (!key) continue;
-    rows.push({ key, value });
-  }
-  rows.sort((a, b) => a.key.localeCompare(b.key));
-  return rows;
-}
-
-function serializeServerProperties(rows: ServerPropertyRow[]): string {
-  return rows.map((r) => `${r.key}=${r.value}`).join("\n") + "\n";
-}
-
-function SettingsPane({ server, addLog }: { server: ServerInfo; addLog: ServerModalProps["addLog"] }) {
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [query, setQuery] = useState("");
-  const [rows, setRows] = useState<ServerPropertyRow[]>([]);
-
-  async function loadProperties() {
-    try {
-      setLoading(true);
-      const res = await cli<any>("read_server_text_file", server.folder, "server.properties");
-      const content = typeof res?.data?.content === "string" ? res.data.content : "";
-      setRows(parseServerProperties(content));
-    } catch (e: any) {
-      addLog("err", `Failed to load server.properties: ${String(e)}`);
-      setRows([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void loadProperties();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server.server_id]);
-
-  const visibleRows = useMemo(() => rows.filter((r) => !isProtectedServerProperty(r.key)), [rows]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return visibleRows;
-    return visibleRows.filter((r) => r.key.toLowerCase().includes(q) || r.value.toLowerCase().includes(q));
-  }, [visibleRows, query]);
-
-  const protectedCount = rows.length - visibleRows.length;
-
-  async function saveProperties() {
-    try {
-      setSaving(true);
-      const content = serializeServerProperties(rows);
-      const encoded = btoa(unescape(encodeURIComponent(content)));
-      await cli("write_server_text_file", server.folder, "server.properties", encoded);
-      addLog("ok", `Saved server.properties for ${server.name}.`);
-      await loadProperties();
-    } catch (e: any) {
-      addLog("err", `Failed to save server.properties: ${String(e)}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function setValueByKey(key: string, nextValue: string) {
-    setRows((curr) => curr.map((row) => (row.key === key ? { ...row, value: nextValue } : row)));
-  }
-
-  return (
-    <div>
-      <div style={styles.paneTitle}>Settings</div>
-      <div style={styles.contentMeta}>Edit <code>server.properties</code> in a structured form.</div>
-      {protectedCount > 0 && (
-        <div style={{ ...styles.contentItemMeta, marginTop: 8 }}>
-          {protectedCount} protected network/tunnel property{protectedCount === 1 ? "" : "ies"} hidden to avoid breaking tunneling (for example: <code>server-port</code>, <code>server-ip</code>, <code>query.port</code>, <code>rcon.port</code>).
-        </div>
-      )}
-
-      <div style={styles.contentSearchRow}>
-        <input style={styles.search} placeholder="Filter properties…" value={query} onChange={(e) => setQuery(e.target.value)} />
-        <button type="button" style={btn("ghost")} onClick={() => void loadProperties()} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button>
-        <button type="button" style={btn("primary")} onClick={() => void saveProperties()} disabled={saving || loading}>{saving ? "Saving…" : "Save"}</button>
-      </div>
-
-      <div style={styles.contentResults}>
-        {filtered.length === 0 ? (
-          <div style={styles.playersEmpty}>{loading ? "Loading properties…" : "No properties match your filter."}</div>
-        ) : (
-          filtered.map((row) => (
-            <div key={row.key} style={styles.contentItem}>
-              <div style={{ minWidth: 180, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontWeight: 700 }}>{row.key}</div>
-              <input
-                style={{ ...styles.search, flex: 1 }}
-                value={row.value}
-                onChange={(e) => setValueByKey(row.key, e.target.value)}
-              />
+              ) : row.valueType === "int" ? (
+                <input
+                  style={{ ...styles.search, flex: 1 }}
+                  type="number"
+                  step={1}
+                  inputMode="numeric"
+                  value={row.value}
+                  onChange={(e) => setIntValueByKey(row.key, e.target.value)}
+                />
+              ) : row.valueType === "float" ? (
+                <input
+                  style={{ ...styles.search, flex: 1 }}
+                  type="number"
+                  step="any"
+                  inputMode="decimal"
+                  value={row.value}
+                  onChange={(e) => setValueByKey(row.key, e.target.value)}
+                />
+              ) : (
+                <input
+                  style={{ ...styles.search, flex: 1 }}
+                  value={row.value}
+                  onChange={(e) => setValueByKey(row.key, e.target.value)}
+                />
+              )}
             </div>
           ))
         )}
@@ -2608,5 +2448,3 @@ function KV({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
     </div>
   );
 }
-
-

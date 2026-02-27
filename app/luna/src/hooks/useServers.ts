@@ -11,6 +11,7 @@ export function useServers(addLog: (lvl: any, msg: string) => void) {
   });
   const [loading, setLoading] = useState(false);
   const inFlightRef = useRef<Promise<void> | null>(null);
+  const lastRefreshAtRef = useRef(0);
 
   const sortedServers = useMemo(() => {
     return [...servers].sort((a, b) => {
@@ -22,7 +23,12 @@ export function useServers(addLog: (lvl: any, msg: string) => void) {
   }, [servers]);
 
   const refresh = useCallback(
-    async ({ silent = false }: { silent?: boolean } = {}) => {
+    async ({ silent = false, minIntervalMs = 0 }: { silent?: boolean; minIntervalMs?: number } = {}) => {
+      const now = Date.now();
+      if (minIntervalMs > 0 && now - lastRefreshAtRef.current < minIntervalMs) {
+        return;
+      }
+
       if (inFlightRef.current) {
         return inFlightRef.current;
       }
@@ -39,6 +45,7 @@ export function useServers(addLog: (lvl: any, msg: string) => void) {
           const next = res.data.servers ?? [];
           setServers(next);
           saveCachedServers(next);
+          lastRefreshAtRef.current = Date.now();
           if (!silent) {
             addLog("ok", `Loaded ${next.length} server(s).`);
           }

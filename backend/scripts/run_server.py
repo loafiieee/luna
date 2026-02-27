@@ -44,10 +44,36 @@ except Exception:  # pragma: no cover
 
 # ---------------- Tunnel runner ----------------
 
+
+def _default_tunnel_status(msg: str) -> None:
+    info(f"[tunnel] {msg}")
+
+
+def _make_tunnel_status_logger(server_id: str, recorder: "RuntimeRecorder") -> Callable[[str], None]:
+    sid = str(server_id)
+
+    def _log(msg: str) -> None:
+        line = f"[tunnel] {msg}"
+        try:
+            info(line)
+        except Exception:
+            pass
+        try:
+            recorder.write_console(line)
+        except Exception:
+            pass
+        try:
+            _emit_console(server_id=sid, line=line)
+        except Exception:
+            pass
+
+    return _log
+
+
 TUNNEL = TunnelRunner(
     edge_url="wss://tunnel.loafiieee.com",
     domain_suffix="mc.loafiieee.com",
-    on_status=lambda s: info(f"[tunnel] {s}"),
+    on_status=_default_tunnel_status,
 )
 
 
@@ -1711,6 +1737,8 @@ def run_server(edition: str, platform: str, version: str, name: str):
         server_config["server_id"] = server_id
 
     recorder = RuntimeRecorder(server_id)
+    prev_tunnel_status = TUNNEL.on_status
+    TUNNEL.on_status = _make_tunnel_status_logger(server_id, recorder)
 
     # Keep edge reservations in sync before opening (best-effort)
     try:
@@ -2037,6 +2065,11 @@ def run_server(edition: str, platform: str, version: str, name: str):
                 TUNNEL.stop()
             except Exception:
                 pass
+
+        try:
+            TUNNEL.on_status = prev_tunnel_status
+        except Exception:
+            pass
 
         if proc and proc.poll() is None:
             try:
@@ -2262,6 +2295,8 @@ def run_server(edition: str, platform: str, version: str, name: str):
         server_config["server_id"] = server_id
 
     recorder = RuntimeRecorder(server_id)
+    prev_tunnel_status = TUNNEL.on_status
+    TUNNEL.on_status = _make_tunnel_status_logger(server_id, recorder)
 
     # Keep edge reservations in sync before opening (best-effort)
     try:
@@ -2588,6 +2623,11 @@ def run_server(edition: str, platform: str, version: str, name: str):
                 TUNNEL.stop()
             except Exception:
                 pass
+
+        try:
+            TUNNEL.on_status = prev_tunnel_status
+        except Exception:
+            pass
 
         if proc and proc.poll() is None:
             try:

@@ -1,9 +1,11 @@
+import { useEffect, useState } from "react";
 import type { ServerInfo } from "../lib/types";
 import { btn, pill } from "./ui";
 import { styles } from "../styles/styles";
-import { serverIconUrl } from "../lib/serverRuntime";
+import { readServerIconDataUrl, serverIconUrl } from "../lib/serverRuntime";
 
 export function ServerCard({
+  index,
   server,
   onOpen,
   onStart,
@@ -13,6 +15,7 @@ export function ServerCard({
   actionBusy,
   isOnline,
 }: {
+  index: number;
   server: ServerInfo;
   onOpen: () => void;
   onStart: () => void;
@@ -24,16 +27,39 @@ export function ServerCard({
 }) {
   const icon = serverIconUrl(server);
   const defaultIcon = new URL("/default-server-icon.png", window.location.origin).toString();
+  const resolvedSrc = icon ?? defaultIcon;
+  const [imgSrc, setImgSrc] = useState(resolvedSrc);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateIcon() {
+      setImgSrc(resolvedSrc);
+      const dataUrl = await readServerIconDataUrl(server);
+      if (!cancelled && dataUrl) {
+        setImgSrc(dataUrl);
+      }
+    }
+
+    void hydrateIcon();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedSrc, server.server_id, server.server_dir]);
 
   return (
-    <div style={styles.card} onClick={onOpen}>
+    <div className="server-card" style={{ ...styles.card, animationDelay: `${Math.min(index * 55, 420)}ms` }} onClick={onOpen}>
       <div style={styles.cardIconWrap}>
         <img
-          src={icon ?? defaultIcon}
+          className="server-card-icon"
+          src={imgSrc}
           alt="server icon"
           style={{ width: "100%", height: "100%", objectFit: "cover", imageRendering: "pixelated" }}
           onError={(e) => {
-            (e.currentTarget as HTMLImageElement).src = defaultIcon;
+            if ((e.currentTarget as HTMLImageElement).src !== defaultIcon) {
+              setImgSrc(defaultIcon);
+            }
           }}
         />
 

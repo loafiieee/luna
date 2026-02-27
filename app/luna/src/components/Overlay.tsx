@@ -1,6 +1,7 @@
 export function Overlay({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
   return (
     <div
+      className="modal-overlay-shell"
       onMouseDown={onClose}
       style={{
         position: "fixed",
@@ -14,7 +15,7 @@ export function Overlay({ children, onClose }: { children: React.ReactNode; onCl
         zIndex: 50,
       }}
     >
-      <div onMouseDown={(e) => e.stopPropagation()} style={{ width: "min(1200px, 100%)" }}>
+      <div onMouseDown={(e) => e.stopPropagation()} style={{ width: "min(1320px, 100%)" }}>
         {children}
       </div>
     </div>

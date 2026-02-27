@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -12,6 +13,25 @@ from typing import Optional, Callable, Dict, Tuple, Any, List, Sequence, Union
 
 import msgpack
 import websockets
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _percentile(values: Sequence[float], q: float) -> float:
+    if not values:
+        return 0.0
+    if q <= 0:
+        return min(values)
+    if q >= 1:
+        return max(values)
+    arr = sorted(values)
+    idx = int((len(arr) - 1) * q)
+    return float(arr[idx])
 
 
 # Cross-platform data dir (luna identity storage)
@@ -30,6 +50,15 @@ def _pack(obj) -> bytes:
 
 def _unpack(b: bytes):
     return msgpack.unpackb(b, raw=False)
+
+
+def _try_set_tcp_nodelay(sock_obj: Any) -> None:
+    if sock_obj is None:
+        return
+    try:
+        sock_obj.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
 
 
 def _default_identity_path(app_name: str = "luna") -> str:
@@ -139,6 +168,30 @@ class ServiceSpec:
     local: int
 
 
+@dataclass
+class _DiagWindow:
+    started_at: float = field(default_factory=time.monotonic)
+    ws_ping_ms: List[float] = field(default_factory=list)
+    ws_ping_failures: int = 0
+
+    ws_send_q_depth_max: int = 0
+    ws_send_q_delay_ms: List[float] = field(default_factory=list)
+    ws_send_bytes: int = 0
+    ws_send_errors: int = 0
+
+    tcp_up_bytes: int = 0
+    tcp_up_send_wait_ms: List[float] = field(default_factory=list)
+
+    tcp_down_bytes: int = 0
+    tcp_down_drain_wait_ms: List[float] = field(default_factory=list)
+
+    udp_up_packets: int = 0
+    udp_up_bytes: int = 0
+    udp_down_packets: int = 0
+    udp_down_bytes: int = 0
+    udp_forward_wait_ms: List[float] = field(default_factory=list)
+
+
 def _normalize_services(
     *,
     services: Optional[Sequence[Union[ServiceSpec, Dict[str, Any]]]] = None,
@@ -211,6 +264,8 @@ class TunnelClient:
         ws_ping_timeout_s: float = 15.0,
         app_keepalive_interval_s: float = 25.0,
         app_keepalive_timeout_s: float = 10.0,
+        diagnostics_enabled: bool = False,
+        diagnostics_interval_s: float = 10.0,
         reconnect: bool = True,
         reconnect_initial_delay_s: float = 1.0,
         reconnect_max_delay_s: float = 20.0,
@@ -248,6 +303,11 @@ class TunnelClient:
         self._app_keepalive_timeout_s = float(app_keepalive_timeout_s)
         self._keepalive_task: Optional[asyncio.Task] = None
 
+        self._diagnostics_enabled = bool(diagnostics_enabled)
+        self._diagnostics_interval_s = max(2.0, float(diagnostics_interval_s))
+        self._diag_task: Optional[asyncio.Task] = None
+        self._diag: _DiagWindow = _DiagWindow()
+
         self._reconnect_enabled = bool(reconnect)
         self._reconnect_initial_delay_s = float(reconnect_initial_delay_s)
         self._reconnect_max_delay_s = float(reconnect_max_delay_s)
@@ -257,12 +317,107 @@ class TunnelClient:
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        self._ws_send_q: Optional[asyncio.Queue[bytes]] = None
+        self._ws_send_q: Optional[asyncio.Queue[Tuple[bytes, float]]] = None
         self._ws_sender_task: Optional[asyncio.Task] = None
 
     def _status(self, msg: str) -> None:
         if self.on_status:
             self.on_status(msg)
+
+    def _diag_push(self, bucket: List[float], v_ms: float, cap: int = 2048) -> None:
+        if not self._diagnostics_enabled:
+            return
+        if len(bucket) < cap:
+            bucket.append(float(v_ms))
+
+    def _diag_note_ws_ping(self, rtt_ms: float) -> None:
+        self._diag_push(self._diag.ws_ping_ms, rtt_ms, cap=512)
+
+    def _diag_note_ws_ping_fail(self) -> None:
+        if self._diagnostics_enabled:
+            self._diag.ws_ping_failures += 1
+
+    def _diag_note_ws_q_depth(self, depth: int) -> None:
+        if self._diagnostics_enabled:
+            self._diag.ws_send_q_depth_max = max(self._diag.ws_send_q_depth_max, int(depth))
+
+    def _diag_note_ws_send(self, queued_ms: float, raw_len: int) -> None:
+        if not self._diagnostics_enabled:
+            return
+        self._diag_push(self._diag.ws_send_q_delay_ms, queued_ms)
+        self._diag.ws_send_bytes += int(raw_len)
+
+    def _diag_note_ws_send_err(self) -> None:
+        if self._diagnostics_enabled:
+            self._diag.ws_send_errors += 1
+
+    def _diag_note_tcp_up(self, byte_count: int, send_wait_ms: float) -> None:
+        if not self._diagnostics_enabled:
+            return
+        self._diag.tcp_up_bytes += int(byte_count)
+        self._diag_push(self._diag.tcp_up_send_wait_ms, send_wait_ms)
+
+    def _diag_note_tcp_down(self, byte_count: int, drain_wait_ms: float) -> None:
+        if not self._diagnostics_enabled:
+            return
+        self._diag.tcp_down_bytes += int(byte_count)
+        self._diag_push(self._diag.tcp_down_drain_wait_ms, drain_wait_ms)
+
+    def _diag_note_udp_up(self, byte_count: int) -> None:
+        if not self._diagnostics_enabled:
+            return
+        self._diag.udp_up_packets += 1
+        self._diag.udp_up_bytes += int(byte_count)
+
+    def _diag_note_udp_down(self, byte_count: int, forward_wait_ms: float) -> None:
+        if not self._diagnostics_enabled:
+            return
+        self._diag.udp_down_packets += 1
+        self._diag.udp_down_bytes += int(byte_count)
+        self._diag_push(self._diag.udp_forward_wait_ms, forward_wait_ms)
+
+    def _diag_emit_and_rotate(self) -> None:
+        if not self._diagnostics_enabled:
+            return
+        now = time.monotonic()
+        d = self._diag
+        elapsed = max(0.001, now - d.started_at)
+
+        ws_q = d.ws_send_q_delay_ms
+        ws_ping = d.ws_ping_ms
+        tcp_up_wait = d.tcp_up_send_wait_ms
+        tcp_down_wait = d.tcp_down_drain_wait_ms
+        udp_wait = d.udp_forward_wait_ms
+
+        line = (
+            "[tunnel][diag] "
+            f"{elapsed:.1f}s "
+            f"ws_ping_ms p50={_percentile(ws_ping, 0.50):.1f} p95={_percentile(ws_ping, 0.95):.1f} "
+            f"max={_percentile(ws_ping, 1.00):.1f} n={len(ws_ping)} fails={d.ws_ping_failures} | "
+            f"ws_q depth_max={d.ws_send_q_depth_max} q_ms p50={_percentile(ws_q, 0.50):.2f} "
+            f"p95={_percentile(ws_q, 0.95):.2f} max={_percentile(ws_q, 1.00):.2f} n={len(ws_q)} "
+            f"bytes={d.ws_send_bytes} errs={d.ws_send_errors} | "
+            f"tcp_up bytes={d.tcp_up_bytes} send_ms p95={_percentile(tcp_up_wait, 0.95):.2f} "
+            f"max={_percentile(tcp_up_wait, 1.00):.2f} n={len(tcp_up_wait)} | "
+            f"tcp_down bytes={d.tcp_down_bytes} drain_ms p95={_percentile(tcp_down_wait, 0.95):.2f} "
+            f"max={_percentile(tcp_down_wait, 1.00):.2f} n={len(tcp_down_wait)} | "
+            f"udp_up pps={d.udp_up_packets / elapsed:.1f} bytes={d.udp_up_bytes} | "
+            f"udp_down pps={d.udp_down_packets / elapsed:.1f} bytes={d.udp_down_bytes} "
+            f"fwd_ms p95={_percentile(udp_wait, 0.95):.2f} max={_percentile(udp_wait, 1.00):.2f} n={len(udp_wait)} | "
+            f"udp_peers={len(self._udp_peers)}"
+        )
+        self._status(line)
+        self._diag = _DiagWindow()
+
+    async def _diag_loop(self) -> None:
+        if not self._diagnostics_enabled:
+            return
+        try:
+            while not self.stop_event.is_set():
+                await asyncio.sleep(self._diagnostics_interval_s)
+                self._diag_emit_and_rotate()
+        except asyncio.CancelledError:
+            pass
 
     async def open(
         self,
@@ -329,6 +484,10 @@ class TunnelClient:
             self._udp_reaper_task.cancel()
             self._udp_reaper_task = None
 
+        if self._diag_task:
+            self._diag_task.cancel()
+            self._diag_task = None
+
         if self._ws_sender_task:
             self._ws_sender_task.cancel()
             self._ws_sender_task = None
@@ -349,6 +508,7 @@ class TunnelClient:
         if spec is None or spec.proto != "tcp":
             raise RuntimeError(f"unknown tcp service {svc!r}")
         r, w = await asyncio.open_connection("127.0.0.1", int(spec.local))
+        _try_set_tcp_nodelay(w.get_extra_info("socket"))
         self._tcp_local[key] = (r, w)
         return r, w
 
@@ -372,7 +532,9 @@ class TunnelClient:
                 data = await reader.read(65536)
                 if not data:
                     break
+                t0 = time.monotonic()
                 await ws.send(_pack({"t": "tcp_data", "svc": svc, "id": cid, "d": data}))
+                self._diag_note_tcp_up(len(data), (time.monotonic() - t0) * 1000.0)
         finally:
             try:
                 await ws.send(_pack({"t": "tcp_close", "svc": svc, "id": cid}))
@@ -386,10 +548,12 @@ class TunnelClient:
             return
         try:
             while not self.stop_event.is_set():
-                raw = await q.get()
+                raw, enqueued_at = await q.get()
                 try:
+                    self._diag_note_ws_send((time.monotonic() - enqueued_at) * 1000.0, len(raw))
                     await ws.send(raw)
                 except Exception:
+                    self._diag_note_ws_send_err()
                     break
         except asyncio.CancelledError:
             pass
@@ -401,7 +565,13 @@ class TunnelClient:
         if not q:
             return
         try:
-            q.put_nowait(_pack(obj))
+            raw = _pack(obj)
+            self._diag_note_ws_q_depth(q.qsize())
+            q.put_nowait((raw, time.monotonic()))
+            if str(obj.get("t") or "") == "udp_data":
+                d = obj.get("d")
+                if isinstance(d, (bytes, bytearray)):
+                    self._diag_note_udp_up(len(d))
         except Exception:
             pass
 
@@ -415,9 +585,12 @@ class TunnelClient:
                     break
 
                 try:
+                    t0 = time.monotonic()
                     pong_waiter = ws.ping()
                     await asyncio.wait_for(pong_waiter, timeout=self._app_keepalive_timeout_s)
+                    self._diag_note_ws_ping((time.monotonic() - t0) * 1000.0)
                 except Exception:
+                    self._diag_note_ws_ping_fail()
                     try:
                         await ws.close()
                     except Exception:
@@ -489,11 +662,13 @@ class TunnelClient:
                 async with websockets.connect(
                     self.edge_url,
                     max_size=None,
+                    compression=None,
                     ping_interval=self._ws_ping_interval_s,
                     ping_timeout=self._ws_ping_timeout_s,
                     close_timeout=5,
                 ) as ws:
                     self.ws = ws
+                    _try_set_tcp_nodelay(ws.transport.get_extra_info("socket") if ws.transport else None)
                     self._last_rx_monotonic = time.monotonic()
                     self._status("connected")
 
@@ -504,6 +679,9 @@ class TunnelClient:
                         self._udp_reaper_task = asyncio.create_task(self._udp_reaper())
 
                     self._keepalive_task = asyncio.create_task(self._keepalive())
+                    if self._diagnostics_enabled:
+                        self._diag = _DiagWindow()
+                        self._diag_task = asyncio.create_task(self._diag_loop())
 
                     await ws.send(
                         _pack(
@@ -577,7 +755,10 @@ class TunnelClient:
                             if pair:
                                 _r, w = pair
                                 w.write(data)
+                                t0 = time.monotonic()
                                 await w.drain()
+                                if isinstance(data, (bytes, bytearray)):
+                                    self._diag_note_tcp_down(len(data), (time.monotonic() - t0) * 1000.0)
 
                         elif t == "tcp_close":
                             svc = str(msg.get("svc") or "mc")
@@ -589,7 +770,10 @@ class TunnelClient:
                             peer_list = msg["peer"]
                             peer = (str(peer_list[0]), int(peer_list[1]))
                             data = msg["d"]
+                            t0 = time.monotonic()
                             await self._udp_forward_to_local(svc, peer, data)
+                            if isinstance(data, (bytes, bytearray)):
+                                self._diag_note_udp_down(len(data), (time.monotonic() - t0) * 1000.0)
 
             except asyncio.CancelledError:
                 break
@@ -601,6 +785,10 @@ class TunnelClient:
                 if self._keepalive_task:
                     self._keepalive_task.cancel()
                     self._keepalive_task = None
+
+                if self._diag_task:
+                    self._diag_task.cancel()
+                    self._diag_task = None
 
                 if self._ws_sender_task:
                     self._ws_sender_task.cancel()
@@ -626,6 +814,9 @@ class TunnelClient:
                         pass
                     self._udp_peers.pop(k, None)
 
+                if self._diagnostics_enabled:
+                    self._diag_emit_and_rotate()
+
             if self.stop_event.is_set():
                 break
             if not self._reconnect_enabled:
@@ -644,6 +835,8 @@ class TunnelRunner:
     domain_suffix: str = "mc.loafiieee.com"
     app_name: str = "luna"
     on_status: Optional[Callable[[str], None]] = None
+    diagnostics_enabled: bool = field(default_factory=lambda: _env_bool("MC_TUNNEL_DIAG", False))
+    diagnostics_interval_s: float = field(default_factory=lambda: float(os.environ.get("MC_TUNNEL_DIAG_INTERVAL_S", "10")))
 
     _loop: Optional[asyncio.AbstractEventLoop] = None
     _thread: Optional[threading.Thread] = None
@@ -683,6 +876,8 @@ class TunnelRunner:
             domain_suffix=self.domain_suffix,
             app_name=self.app_name,
             on_status=self.on_status,
+            diagnostics_enabled=self.diagnostics_enabled,
+            diagnostics_interval_s=self.diagnostics_interval_s,
         )
 
         fut = asyncio.run_coroutine_threadsafe(
@@ -762,10 +957,12 @@ async def _sync_desired_async(*, edge_url: str, app_name: str, desired: Any) -> 
     async with websockets.connect(
         edge_url,
         max_size=None,
+        compression=None,
         ping_interval=15,
         ping_timeout=15,
         close_timeout=5,
     ) as ws:
+        _try_set_tcp_nodelay(ws.transport.get_extra_info("socket") if ws.transport else None)
         await ws.send(_pack({"t": "hello", "op": "sync", "device_id": device_id, "secret": secret, "desired": desired}))
         resp = _unpack(await ws.recv())
         if resp.get("t") == "err":

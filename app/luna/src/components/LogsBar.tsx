@@ -15,6 +15,8 @@ export function LogsBar({
   logs: LogItem[];
   endRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  const drawerHeight = open ? "var(--logs-open-height)" : 0;
+
   return (
     <div style={styles.logsWrap}>
       <div style={styles.logsBar} onClick={onToggle} role="button">
@@ -27,9 +29,10 @@ export function LogsBar({
       </div>
 
       <div
+        className="logs-drawer-shell"
         style={{
           ...styles.logsDrawer,
-          height: open ? 220 : 0,
+          height: drawerHeight,
           borderTop: open ? "1px solid rgba(255,255,255,.10)" : "1px solid rgba(255,255,255,.06)",
         }}
       >

@@ -857,6 +857,64 @@ def _spawn_detached(args: list[str]) -> int:
     proc = subprocess.Popen(args, **kwargs)
     return int(proc.pid)
 
+
+def _run_rpc_daemon(exe_argv0: str) -> int:
+    """Serve JSON-RPC-like requests over stdin/stdout in a single long-lived process.
+
+    Each request line is JSON:
+      {"id": "<opaque>", "args": ["command", "..."]}
+    """
+    data_root = str(get_data_root())
+
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            # Parent closed stdin: graceful shutdown.
+            return 0
+        raw = line.strip()
+        if not raw:
+            continue
+
+        request_id: Optional[str] = None
+        req_args: Optional[List[str]] = None
+        try:
+            obj = json.loads(raw)
+            if not isinstance(obj, dict):
+                raise ValueError("request must be a JSON object")
+
+            rid = obj.get("id")
+            if rid is not None:
+                request_id = str(rid)
+
+            args_obj = obj.get("args")
+            if not isinstance(args_obj, list) or not all(isinstance(a, str) for a in args_obj):
+                raise ValueError("args must be an array of strings")
+            if not args_obj:
+                raise ValueError("args must include a command")
+            if args_obj[0] == "rpc_daemon":
+                raise ValueError("rpc_daemon cannot be called from rpc_daemon")
+
+            req_args = list(args_obj)
+        except Exception as e:
+            set_request_id(request_id)
+            error(f"Invalid rpc request: {e}")
+            set_request_id(None)
+            continue
+
+        set_request_id(request_id)
+        try:
+            rc = main([exe_argv0, "--json", "--data-dir", data_root, *req_args])
+            if rc != 0:
+                # Safety net: commands should emit a structured error before non-zero exit.
+                error(f"Command exited with status {rc}")
+            # Always emit a terminal result event so RPC clients never block
+            # waiting on commands that only emit logs.
+            result("rpc_complete", {"ok": rc == 0, "exit_code": rc})
+        except Exception as e:
+            error(f"Unhandled rpc request error: {e}")
+        finally:
+            set_request_id(None)
+
 def main(argv: List[str]) -> int:
     # Global flags
     if "--json" in argv:
@@ -1917,10 +1975,13 @@ def main(argv: List[str]) -> int:
     if cmd == "help":
         info(
             "Available commands: get_versions, install_server, get_platforms, run_server, start_server, stop_server, delete_server, get_reserved_ports, "
-            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, set_tunnel_config, sync_tunnels, open_server_folder, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop"
+            "modrinth_search, modrinth_project, modrinth_download, modrinth_list_installed, modrinth_browse_config_files, modrinth_config_candidates, modrinth_set_preferred_config, read_server_text_file, write_server_text_file, modrinth_uninstall_project, modrinth_remove_installed, backup_create, backup_list, backup_delete, backup_restore, backup_schedule_get, backup_schedule_set, backup_schedule_run, set_tunnel_config, sync_tunnels, open_server_folder, pty_start, pty_write, pty_poll, pty_resize, pty_status, pty_stop, rpc_daemon"
         )
         info("Add --json to output machine-readable JSON events")
         return 0
+
+    if cmd == "rpc_daemon":
+        return _run_rpc_daemon(argv[0])
 
     error("Unknown command")
     return 1

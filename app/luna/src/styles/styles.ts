@@ -3,78 +3,79 @@ import type React from "react";
 export const styles: Record<string, React.CSSProperties> = {
   app: {
     minHeight: "100vh",
-    paddingBottom: 44,
+    paddingBottom: "calc(46px + env(safe-area-inset-bottom, 0px))",
     color: "rgba(255,255,255,.92)",
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+    fontFamily: "\"Manrope\", \"Avenir Next\", \"Segoe UI\", sans-serif",
     background:
-      "radial-gradient(1200px 700px at 10% 0%, rgba(59,130,246,.16), transparent 60%), radial-gradient(900px 600px at 100% 10%, rgba(168,85,247,.12), transparent 55%), #070A12",
+      "radial-gradient(1250px 760px at 10% 0%, rgba(56,189,248,.16), transparent 60%), radial-gradient(900px 620px at 100% 10%, rgba(14,165,233,.12), transparent 55%), #070A12",
   },
 
   topChrome: {
-    maxWidth: 1200,
+    maxWidth: "var(--luna-content-max)",
     margin: "0 auto",
-    padding: "18px 18px 6px",
+    padding: "clamp(12px, 1.25vw, 20px) clamp(14px, 1.45vw, 24px) 6px",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
+    gap: "clamp(10px, 1vw, 16px)",
   },
 
   brandDot: {
-    width: 14,
-    height: 14,
+    width: "clamp(12px, .9vw, 15px)",
+    height: "clamp(12px, .9vw, 15px)",
     borderRadius: 999,
-    background: "linear-gradient(135deg, rgba(59,130,246,1), rgba(168,85,247,1))",
-    boxShadow: "0 0 0 6px rgba(255,255,255,.03)",
+    background: "linear-gradient(135deg, rgba(56,189,248,1), rgba(37,99,235,1))",
+    boxShadow: "0 0 0 clamp(4px, .6vw, 7px) rgba(255,255,255,.03)",
   },
 
-  brandTitle: { fontSize: 18, fontWeight: 950, letterSpacing: 0.2 },
-  brandSub: { fontSize: 12, opacity: 0.65, marginTop: 2 },
+  brandTitle: { fontSize: "clamp(18px, 1.1vw, 23px)", fontWeight: 950, letterSpacing: 0.2 },
+  brandSub: { fontSize: "clamp(11px, .72vw, 13px)", opacity: 0.65, marginTop: 2 },
 
   errorBox: {
-    maxWidth: 1200,
+    maxWidth: "var(--luna-content-max)",
     margin: "8px auto 0",
-    padding: 12,
-    borderRadius: 16,
+    padding: "clamp(10px, 1vw, 14px)",
+    borderRadius: "clamp(14px, 1vw, 18px)",
     background: "rgba(239,68,68,.12)",
     border: "1px solid rgba(239,68,68,.25)",
     color: "rgba(255,255,255,.92)",
-    fontSize: 12,
+    fontSize: "clamp(12px, .76vw, 13px)",
   },
 
   grid: {
-    maxWidth: 1200,
+    maxWidth: "var(--luna-content-max)",
     margin: "10px auto 0",
-    padding: "12px 18px 22px",
+    padding: "clamp(10px, .95vw, 14px) clamp(14px, 1.45vw, 24px) clamp(20px, 2.5vw, 30px)",
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(270px, 1fr))",
-    gap: 16,
+    gridTemplateColumns: "repeat(auto-fill, minmax(clamp(220px, 28vw, 320px), 1fr))",
+    gap: "clamp(12px, 1vw, 18px)",
   },
 
   empty: {
     gridColumn: "1 / -1",
-    padding: 18,
-    borderRadius: 18,
+    padding: "clamp(14px, 1.3vw, 22px)",
+    borderRadius: "clamp(14px, 1.2vw, 20px)",
     border: "1px dashed rgba(255,255,255,.14)",
     background: "rgba(255,255,255,.04)",
   },
 
   // Card
   card: {
-    borderRadius: 18,
+    borderRadius: "clamp(15px, 1.2vw, 22px)",
     overflow: "hidden",
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.05)",
-    boxShadow: "0 18px 60px rgba(0,0,0,.45)",
+    boxShadow: "0 18px 56px rgba(0,0,0,.45)",
     cursor: "pointer",
     display: "flex",
     flexDirection: "column",
-    minHeight: 220,
+    minHeight: "clamp(214px, 27vw, 290px)",
+    transition: "transform 200ms ease, box-shadow 220ms ease",
   },
 
   cardIconWrap: {
     position: "relative",
-    height: 140,
+    height: "clamp(128px, 17vw, 186px)",
     background: "rgba(255,255,255,.06)",
   },
 
@@ -98,15 +99,15 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   cardBottom: {
-    padding: 14,
+    padding: "clamp(12px, 1vw, 16px)",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
+    gap: "clamp(10px, .9vw, 14px)",
   },
 
   cardName: {
-    fontSize: 15,
+    fontSize: "clamp(14px, .92vw, 17px)",
     fontWeight: 950,
     overflow: "hidden",
     textOverflow: "ellipsis",
@@ -122,14 +123,14 @@ export const styles: Record<string, React.CSSProperties> = {
 
   playerHint: {
     opacity: 0.75,
-    fontSize: 12,
+    fontSize: "clamp(11px, .75vw, 13px)",
     fontWeight: 800,
   },
 
   // Modal
   modal: {
-    width: "min(1200px, 100%)",
-    borderRadius: 22,
+    width: "min(1320px, 100%)",
+    borderRadius: "clamp(16px, 1.4vw, 24px)",
     overflow: "hidden",
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(10,14,26,.92)",
@@ -141,8 +142,8 @@ export const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
-    padding: 14,
+    gap: "clamp(10px, .9vw, 14px)",
+    padding: "clamp(10px, .9vw, 14px)",
     background: "rgba(255,255,255,.05)",
     borderBottom: "1px solid rgba(255,255,255,.10)",
   },
@@ -156,9 +157,9 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   modalIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: "clamp(40px, 2.8vw, 48px)",
+    height: "clamp(40px, 2.8vw, 48px)",
+    borderRadius: "clamp(12px, .95vw, 15px)",
     overflow: "hidden",
     border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(255,255,255,.06)",
@@ -181,7 +182,7 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   modalName: {
-    fontSize: 16,
+    fontSize: "clamp(15px, .95vw, 18px)",
     fontWeight: 950,
     overflow: "hidden",
     textOverflow: "ellipsis",
@@ -194,7 +195,7 @@ export const styles: Record<string, React.CSSProperties> = {
     padding: 0,
     margin: 0,
     color: "rgba(255,255,255,.92)",
-    fontSize: 16,
+    fontSize: "clamp(15px, .95vw, 18px)",
     fontWeight: 950,
     cursor: "text",
     overflow: "hidden",
@@ -208,29 +209,32 @@ export const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(59,130,246,.6)",
     background: "rgba(255,255,255,.08)",
     color: "rgba(255,255,255,.95)",
-    fontSize: 15,
+    fontSize: "clamp(14px, .9vw, 16px)",
     fontWeight: 900,
-    padding: "6px 10px",
-    minWidth: 180,
+    padding: "clamp(5px, .5vw, 7px) clamp(9px, .8vw, 11px)",
+    minWidth: 170,
   },
 
   modalSubtitle: {
     marginTop: 4,
-    fontSize: 12,
+    fontSize: "clamp(11px, .72vw, 13px)",
     opacity: 0.65,
   },
 
   modalTopRight: {
     display: "flex",
     alignItems: "center",
-    gap: 12,
+    gap: "clamp(8px, .85vw, 12px)",
+    minWidth: 0,
+    paddingRight: 4,
   },
 
   addrButton: {
-    minWidth: 240,
-    maxWidth: 360,
-    padding: "8px 10px",
-    borderRadius: 12,
+    minWidth: "clamp(180px, 22vw, 290px)",
+    maxWidth: "min(390px, 100%)",
+    flex: "1 1 clamp(180px, 24vw, 270px)",
+    padding: "clamp(7px, .75vw, 9px) clamp(9px, .9vw, 12px)",
+    borderRadius: "clamp(10px, .95vw, 14px)",
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(255,255,255,.04)",
     color: "rgba(255,255,255,.92)",
@@ -243,10 +247,10 @@ export const styles: Record<string, React.CSSProperties> = {
     background: "rgba(34,197,94,.12)",
   },
 
-  addrLabel: { fontSize: 11, opacity: 0.7, fontWeight: 800 },
+  addrLabel: { fontSize: "clamp(10px, .66vw, 11px)", opacity: 0.7, fontWeight: 800 },
   addrValue: {
     marginTop: 2,
-    fontSize: 12,
+    fontSize: "clamp(11px, .78vw, 13px)",
     fontWeight: 900,
     opacity: 0.92,
     overflow: "hidden",
@@ -255,12 +259,12 @@ export const styles: Record<string, React.CSSProperties> = {
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
   },
 
-  addrHint: { fontSize: 11, opacity: 0.7, marginTop: 4, fontWeight: 700 },
+  addrHint: { fontSize: "clamp(10px, .66vw, 11px)", opacity: 0.7, marginTop: 4, fontWeight: 700 },
 
   modalBody: {
     display: "grid",
-    gridTemplateColumns: "200px 1fr 300px",
-    minHeight: 520,
+    gridTemplateColumns: "minmax(180px, 220px) minmax(0, 1fr) minmax(250px, 320px)",
+    minHeight: "clamp(460px, 66vh, 760px)",
   },
 
   confirmOverlay: {
@@ -275,10 +279,10 @@ export const styles: Record<string, React.CSSProperties> = {
 
   confirmCard: {
     width: "min(520px, 100%)",
-    borderRadius: 16,
+    borderRadius: "clamp(14px, 1vw, 18px)",
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(12,16,28,.98)",
-    padding: 16,
+    padding: "clamp(12px, 1vw, 16px)",
     boxShadow: "0 20px 60px rgba(0,0,0,.55)",
   },
 
@@ -290,12 +294,12 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   leftNav: {
-    padding: 12,
+    padding: "clamp(10px, .9vw, 14px)",
     borderRight: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.03)",
     display: "flex",
     flexDirection: "column",
-    gap: 10,
+    gap: "clamp(8px, .7vw, 10px)",
   },
 
   leftNavFooter: {
@@ -306,7 +310,7 @@ export const styles: Record<string, React.CSSProperties> = {
   deleteServerBtn: {
     width: "100%",
     textAlign: "left",
-    padding: "10px 12px",
+    padding: "clamp(9px, .8vw, 11px) clamp(10px, .85vw, 12px)",
     borderRadius: 12,
     border: "1px solid rgba(239,68,68,.4)",
     background: "rgba(239,68,68,.16)",
@@ -315,10 +319,10 @@ export const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
 
-  centerPane: { padding: 16 },
+  centerPane: { padding: "clamp(12px, 1vw, 18px)" },
 
   rightPane: {
-    padding: 12,
+    padding: "clamp(10px, .9vw, 14px)",
     borderLeft: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.03)",
     display: "flex",
@@ -336,41 +340,41 @@ export const styles: Record<string, React.CSSProperties> = {
 
   search: {
     width: "100%",
-    padding: "10px 12px",
-    borderRadius: 14,
+    padding: "clamp(9px, .85vw, 11px) clamp(10px, .95vw, 13px)",
+    borderRadius: "clamp(12px, .95vw, 15px)",
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.06)",
     color: "rgba(255,255,255,.92)",
     fontWeight: 800,
-    fontSize: 13,
+    fontSize: "clamp(12px, .8vw, 13px)",
   },
 
   playersList: {
     flex: 1,
     overflow: "auto",
     padding: 6,
-    borderRadius: 16,
+    borderRadius: "clamp(12px, 1vw, 16px)",
     border: "1px solid rgba(255,255,255,.08)",
     background: "rgba(255,255,255,.04)",
   },
 
-  playersEmpty: { padding: 12, opacity: 0.7, fontWeight: 800, fontSize: 13 },
+  playersEmpty: { padding: "clamp(10px, .85vw, 12px)", opacity: 0.7, fontWeight: 800, fontSize: "clamp(12px, .82vw, 13px)" },
 
   playerRow: {
     display: "flex",
     alignItems: "center",
     gap: 10,
-    padding: "8px 10px",
-    borderRadius: 14,
+    padding: "clamp(7px, .7vw, 9px) clamp(9px, .85vw, 11px)",
+    borderRadius: "clamp(11px, .9vw, 14px)",
     border: "1px solid rgba(255,255,255,.08)",
     background: "rgba(255,255,255,.05)",
     marginBottom: 8,
   },
 
   playerHead: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
+    width: "clamp(30px, 2vw, 34px)",
+    height: "clamp(30px, 2vw, 34px)",
+    borderRadius: "clamp(9px, .75vw, 11px)",
     border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(255,255,255,.06)",
     display: "grid",
@@ -379,25 +383,25 @@ export const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
   },
 
-  paneTitle: { fontSize: 16, fontWeight: 950 },
+  paneTitle: { fontSize: "clamp(15px, .95vw, 18px)", fontWeight: 950 },
 
   consoleHint: {
     marginTop: 8,
     opacity: 0.7,
-    fontSize: 12,
+    fontSize: "clamp(11px, .72vw, 13px)",
     fontWeight: 700,
   },
 
   consoleView: {
     marginTop: 10,
-    height: 370,
+    height: "clamp(280px, 40vh, 430px)",
     overflow: "auto",
-    borderRadius: 14,
+    borderRadius: "clamp(12px, 1vw, 16px)",
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(2,6,23,.92)",
-    padding: 10,
+    padding: "clamp(8px, .8vw, 10px)",
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    fontSize: 12,
+    fontSize: "clamp(11px, .72vw, 13px)",
     lineHeight: 1.45,
   },
 
@@ -418,17 +422,19 @@ export const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: 10,
+    flexWrap: "wrap",
   },
 
   consoleInput: {
     flex: 1,
-    padding: "10px 12px",
+    minWidth: 0,
+    padding: "clamp(9px, .85vw, 11px) clamp(10px, .95vw, 13px)",
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.04)",
     color: "rgba(255,255,255,.95)",
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    fontSize: 12,
+    fontSize: "clamp(11px, .72vw, 13px)",
     fontWeight: 700,
   },
 
@@ -848,8 +854,8 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   logsBar: {
-    height: 44,
-    padding: "0 14px",
+    height: "clamp(42px, 3.4vw, 48px)",
+    padding: "0 clamp(12px, 1.2vw, 16px)",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -860,13 +866,13 @@ export const styles: Record<string, React.CSSProperties> = {
     userSelect: "none",
   },
 
-  logsHandle: { width: 34, height: 6, borderRadius: 999, background: "rgba(255,255,255,.14)" },
+  logsHandle: { width: "clamp(30px, 2.4vw, 36px)", height: 6, borderRadius: 999, background: "rgba(255,255,255,.14)" },
 
   logsDrawer: {
     overflow: "hidden",
     background: "rgba(8,10,18,.92)",
     backdropFilter: "blur(10px)",
-    transition: "height 160ms ease",
+    transition: "height 200ms ease",
   },
 
   logsHeader: {
@@ -877,17 +883,17 @@ export const styles: Record<string, React.CSSProperties> = {
   },
 
   logsBody: {
-    maxHeight: 180,
+    maxHeight: "calc(var(--logs-open-height) - 56px)",
     overflow: "auto",
-    padding: "0 12px 12px",
+    padding: "0 clamp(10px, 1vw, 12px) clamp(10px, 1vw, 12px)",
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    fontSize: 12,
+    fontSize: "clamp(11px, .72vw, 13px)",
   },
 
   logRow: {
     display: "grid",
-    gridTemplateColumns: "70px 70px 1fr",
-    gap: 10,
+    gridTemplateColumns: "clamp(62px, 6vw, 78px) clamp(62px, 6vw, 78px) 1fr",
+    gap: "clamp(8px, .8vw, 12px)",
     padding: "6px 0",
     borderBottom: "1px solid rgba(255,255,255,.06)",
   },

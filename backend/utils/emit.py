@@ -74,6 +74,7 @@ def install_output_capture():
 
 
 _JSON_MODE: bool = False
+_REQUEST_ID: Optional[str] = None
 
 
 def set_json_mode(enabled: bool) -> None:
@@ -85,19 +86,27 @@ def is_json_mode() -> bool:
     return _JSON_MODE
 
 
+def set_request_id(request_id: Optional[str]) -> None:
+    global _REQUEST_ID
+    _REQUEST_ID = request_id
+
+
 def _ts() -> str:
     # RFC3339-ish, stable for machines + humans
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _print_json(obj: Dict[str, Any]) -> None:
-    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    payload = dict(obj)
+    if _REQUEST_ID and "request_id" not in payload:
+        payload["request_id"] = _REQUEST_ID
+
     try:
         # Write UTF-8 bytes directly so emojis/non-ASCII from APIs don't fail on cp1252/charmap consoles.
-        _RAW_STDOUT.buffer.write(line.encode("utf-8", errors="replace"))
+        _RAW_STDOUT.buffer.write(json.dumps(payload, ensure_ascii=False).encode("utf-8", errors="replace") + b"\n")
         _RAW_STDOUT.buffer.flush()
     except Exception:
-        _RAW_STDOUT.write(json.dumps(obj, ensure_ascii=True) + "\n")
+        _RAW_STDOUT.write(json.dumps(payload, ensure_ascii=True) + "\n")
         _RAW_STDOUT.flush()
 
 
